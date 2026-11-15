@@ -89,12 +89,14 @@ own pages and follow their terms.
 
 ## Quick start
 
-1. Download `Headroom.exe` from the releases and start it. A speaker icon appears in the tray; drag it
-   out of the overflow menu if you want it visible.
+1. Download `Headroom-Setup-….exe` from the [releases](https://github.com/jakobtech/headroom/releases) and run it
+   (no administrator rights needed). Prefer no installer? `Headroom.exe` from the same page runs on its own.
+   A speaker icon appears in the tray; drag it out of the overflow menu if you want it visible.
 2. Click it to open the mixer. Right-click it for the menu (settings, start with Windows, exit).
 3. Install the optional extras above if you want them.
 
-Nothing to uninstall: exit it from the tray menu, switch off *Start with Windows* in the same menu and delete the
+To remove it, uninstall it in Windows *Settings > Apps* (the setup asks whether to keep your settings). With the
+portable `Headroom.exe`: exit it from the tray menu, switch off *Start with Windows* in the same menu and delete the
 file. Settings live in `%APPDATA%\Headroom\settings.cfg`, the log in
 `%LOCALAPPDATA%\Headroom\log.txt`.
 

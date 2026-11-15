@@ -25,12 +25,25 @@ jobs:
         shell: msys2 {0}
         run: bash ./build.sh
 
+      # The setup program, made with Inno Setup (free). It needs the program built above.
+      - name: Setup program
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0-dev' }
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=$version" installer\headroom.iss
+          if ($LASTEXITCODE -ne 0) { throw 'setup failed' }
+
       - uses: actions/upload-artifact@v4
         with:
           name: Headroom
-          path: bin/Headroom.exe
+          path: |
+            bin/Headroom.exe
+            installer/Output/*.exe
 
-      # A tag makes a draft release with the program attached. A draft is visible only to you.
+      # A tag makes a draft release with the setup and the program attached. A draft is visible only to you.
       - name: Draft release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -38,8 +51,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          (cd bin && sha256sum Headroom.exe > Headroom.exe.sha256)
+          cp installer/Output/Headroom-Setup-*.exe bin/
+          (cd bin && sha256sum Headroom.exe Headroom-Setup-*.exe > SHA256SUMS.txt)
           flags="--draft"
           case "$tag" in *alpha*|*beta*|*rc*) flags="$flags --prerelease";; esac
-          gh release create "$tag" bin/Headroom.exe bin/Headroom.exe.sha256 \
+          gh release create "$tag" bin/Headroom-Setup-*.exe bin/Headroom.exe bin/SHA256SUMS.txt \
             $flags --title "$tag" --notes "See CHANGELOG.md."
