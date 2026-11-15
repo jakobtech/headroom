@@ -11,6 +11,9 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## 2.1.0-alpha3
+- The loudness speed "Compet." is now called "Comp".
+
 ## 2.1.0-alpha2
 - A setup program (`Headroom-Setup-<version>.exe`) next to the portable `Headroom.exe`: installs for the current user without administrator rights, with a Start menu entry and optional desktop icon and *Start with Windows*; uninstalls cleanly and asks whether to keep the settings.
 
