@@ -11,6 +11,9 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## 2.1.0-alpha2
+- A setup program (`Headroom-Setup-<version>.exe`) next to the portable `Headroom.exe`: installs for the current user without administrator rights, with a Start menu entry and optional desktop icon and *Start with Windows*; uninstalls cleanly and asks whether to keep the settings.
+
 ## 2.1.0-alpha1
 - Settings window: scroll bars for the hidden apps and hidden devices lists, Reset to default (everything, after a confirmation), and Export / Import of all settings to a file.
 - The app is now called Headroom. Settings, log and the autostart entry move along on the first start; the Equalizer APO files are renamed too.

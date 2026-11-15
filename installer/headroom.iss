@@ -7,7 +7,7 @@
 ; program and the autostart entry; the settings stay unless you choose to delete them.
 
 #ifndef AppVersion
-  #define AppVersion "2.1.0-alpha1"
+  #define AppVersion "2.1.0-alpha2"
 #endif
 
 [Setup]
