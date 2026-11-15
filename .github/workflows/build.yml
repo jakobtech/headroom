@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: mingw-w64-clang-x86_64-toolchain
+
+      - name: Build
+        shell: msys2 {0}
+        run: bash ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Headroom
+          path: bin/Headroom.exe
+
+      # A tag makes a draft release with the program attached. A draft is visible only to you.
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          sha256sum bin/Headroom.exe > bin/Headroom.exe.sha256
+          flags="--draft"
+          case "$tag" in *alpha*|*beta*|*rc*) flags="$flags --prerelease";; esac
+          gh release create "$tag" bin/Headroom.exe bin/Headroom.exe.sha256 \
+            $flags --title "$tag" --notes "See CHANGELOG.md."
