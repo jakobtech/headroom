@@ -38,7 +38,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          sha256sum bin/Headroom.exe > bin/Headroom.exe.sha256
+          (cd bin && sha256sum Headroom.exe > Headroom.exe.sha256)
           flags="--draft"
           case "$tag" in *alpha*|*beta*|*rc*) flags="$flags --prerelease";; esac
           gh release create "$tag" bin/Headroom.exe bin/Headroom.exe.sha256 \
