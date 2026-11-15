@@ -6,8 +6,8 @@ Every state that was tested and worked is tagged `vX.Y.Z[-alphaN]`.
 Going back to a known state:
 
 ```
-git checkout v2.0.0-alpha4      # look around (detached)
-git switch -c back-to-alpha4 v2.0.0-alpha4   # continue from there
+git checkout v2.1.0-alpha1      # look around (detached)
+git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
