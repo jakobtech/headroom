@@ -41,7 +41,7 @@ It is a single small program (under 1 MB, no installer, no framework) written in
 | **Boost** | Unlock single apps up to **500 %** |
 | **Equalizer** | Per app and per output. Bass/Mids/Treble or 5, 10, 15 bands, presets, your own presets |
 | **LoudMax** | Limiter per app and per output (optional, free plugin) |
-| **Loudness equalization** | Per app, six speeds from *Compet.* (made for games) to *Long*, an expert mode and your own saved settings |
+| **Loudness equalization** | Per app, six speeds from *Comp* (made for games) to *Long*, an expert mode and your own saved settings |
 | **Surround channels** | For games that play 5.1/7.1: a volume for each channel (front, center, back, sides, bass), for example to hear footsteps better |
 | **Microphone tab** | Default microphone with volume and mute, every input, and the apps that record right now |
 | **Volume at startup** | Set an app or a device to a fixed volume whenever it starts |
@@ -122,7 +122,7 @@ loudness equalization. Hover the small (i) next to a setting for a short explana
 **Equalizer:** drag a band, scroll over it, or right-click it to reset it. Choose *Basic* (bass, mids, treble) or
 5, 10 or 15 bands; the curve carries over when you switch.
 
-**Loudness equalization** turns loud sounds down and quiet ones up. *Compet.* is made for games: footsteps come
+**Loudness equalization** turns loud sounds down and quiet ones up. *Comp* is made for games: footsteps come
 up, shots and explosions are cut within milliseconds, and the output queue is the shortest. *Custom* starts from
 any ready-made speed, has eight values and can be saved under a name for other apps.
 

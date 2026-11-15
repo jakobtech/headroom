@@ -9842,7 +9842,7 @@ const wchar_t* EqInfoText(int control) {
     }
     if (control == EQ_INFO_LOUDNESS) {
         return L"Keeps this app's volume even: loud sounds are turned down, quiet ones raised. Choose "
-               L"a ready-made speed (Compet. is made for games: quiet footsteps come up, shots and explosions are cut "
+               L"a ready-made speed (Comp is made for games: quiet footsteps come up, shots and explosions are cut "
                L"within milliseconds, and its output queue is the shortest, about 6 ms less delay), or Custom to set every value yourself "
                L"and save it as a preset for other apps. Only for apps that run through the mixer "
                L"(needs VB-CABLE).";
@@ -10349,7 +10349,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         DrawEqToggle(dc, g, at.loudnessToggle, g_eq.loudness.on,
                      g_eq.control == EQ_LOUDNESS_TOGGLE);
-        static constexpr PCWSTR releases[6] = {L"Compet.", L"Ultra", L"Short", L"Medium", L"Long", L"Custom"};
+        static constexpr PCWSTR releases[6] = {L"Comp", L"Ultra", L"Short", L"Medium", L"Long", L"Custom"};
         static constexpr int positions[6] = {2, 3, 4, 1, 5, 0};  // Release value -> place.
         DrawEqSegments(dc, at.release, 6, releases, positions[ClampInt(g_eq.loudness.release, 0, 5)],
                        g_eq.control, EQ_RELEASE_FIRST, control);

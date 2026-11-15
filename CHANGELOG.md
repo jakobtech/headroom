@@ -47,7 +47,7 @@ git revert <commit>             # undo one change, keep the history
 - Master volume menu has "Volume at startup" too
 
 ## 2.0.0-alpha12
-- Loudness equalization: new mode "Compet." for games (quiet footsteps up to 15 dB louder, shots and
+- Loudness equalization: new mode "Comp" for games (quiet footsteps up to 15 dB louder, shots and
   explosions cut by up to 18 dB within milliseconds, 1.5 ms look-ahead, shorter output queue)
 - Custom loudness settings start from a ready-made speed; the preset list offers each as "Start from ..."
 - "Volume at startup" in the menu of apps and devices: an app is set to it whenever it starts to play,
