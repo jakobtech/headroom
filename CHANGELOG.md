@@ -11,6 +11,12 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## Unreleased
+- Export and import now also carry "Start with Windows" and the output Windows keeps for each app.
+- Before a reset or an import replaces the settings, a copy is kept as `settings.before-replace.cfg`.
+- The silent output goes back to stereo whenever no app needs surround sound, also after a reset.
+- The small bar below the selected choice in selection controls is gone.
+
 ## 2.1.0-alpha3
 - The loudness speed "Compet." is now called "Comp".
 

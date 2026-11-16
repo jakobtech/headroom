@@ -850,6 +850,77 @@ std::string ReadWholeFile(const std::wstring& path) {
 // Everything the app keeps (settings, equalizers, loudness, hidden lists ...) in one file.
 void RestartApp();
 
+// ---------------------------------------------------------------------------
+// What an export carries besides the settings file: "Start with Windows", and the output Windows keeps for each
+// app (Settings > Sound > Volume mixer). They live in the registry, not in the settings file, so the export
+// writes them into the file for a moment, and the import puts them back.
+// ---------------------------------------------------------------------------
+constexpr PCWSTR ROUTES_KEY = L"Software\\Microsoft\\Internet Explorer\\LowRegistry\\Audio\\PolicyConfig\\PropertyStore";
+constexpr PCWSTR EXPORT_ROUTES_VALUE = L"export_winRoutes_v1";
+constexpr PCWSTR EXPORT_AUTOSTART_VALUE = L"export_autostart_v1";
+
+bool IsRouteKeyName(const std::wstring& name) {
+    if (name.size() != 10 || name[8] != L'_') return false;
+    for (size_t i = 0; i < 8; ++i) {
+        if (!iswxdigit(name[i])) return false;
+    }
+    return iswdigit(name[9]) != 0;
+}
+
+// One line per app: "key name<TAB>value", the value being what Windows wrote (device, app path).
+std::wstring CollectAppRoutes() {
+    std::wstring lines;
+    HKEY base = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, ROUTES_KEY, 0, KEY_READ, &base) != ERROR_SUCCESS) return lines;
+    for (DWORD index = 0;; ++index) {
+        wchar_t name[64];
+        DWORD nameSize = ARRAYSIZE(name);
+        if (RegEnumKeyExW(base, index, name, &nameSize, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+        if (!IsRouteKeyName(name)) continue;
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(base, name, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) continue;
+        std::vector<wchar_t> value(2048);
+        DWORD size = static_cast<DWORD>(value.size() * sizeof(wchar_t)), type = 0;
+        if (RegQueryValueExW(key, nullptr, nullptr, &type, reinterpret_cast<BYTE*>(value.data()), &size) == ERROR_SUCCESS &&
+            type == REG_SZ && value[0] == L'{' && wcschr(value.data(), L'|')) {
+            value.back() = L'\0';
+            lines += std::wstring(name) + L"\t" + value.data() + L"\n";
+        }
+        RegCloseKey(key);
+    }
+    RegCloseKey(base);
+    return lines;
+}
+
+// Puts them back. Entries for apps or devices this PC does not have do no harm: Windows ignores them.
+int RestoreAppRoutes(const std::wstring& lines) {
+    int restored = 0;
+    size_t start = 0;
+    while (start < lines.size()) {
+        size_t end = lines.find(L'\n', start);
+        if (end == std::wstring::npos) end = lines.size();
+        std::wstring line = lines.substr(start, end - start);
+        start = end + 1;
+        size_t tab = line.find(L'\t');
+        if (tab == std::wstring::npos) continue;
+        std::wstring name = line.substr(0, tab), value = line.substr(tab + 1);
+        if (!IsRouteKeyName(name) || value.empty() || value[0] != L'{' || value.find(L'|') == std::wstring::npos) continue;
+        HKEY key = nullptr;
+        std::wstring path = std::wstring(ROUTES_KEY) + L"\\" + name;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) !=
+            ERROR_SUCCESS) {
+            continue;
+        }
+        if (RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                           static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS) {
+            ++restored;
+        }
+        RegCloseKey(key);
+    }
+    return restored;
+}
+
+
 // A copy of everything, made before a reset or an import replaces it: the last way back.
 void KeepBackupBeforeReplacing() {
     headroom::MarkDirty();
@@ -868,9 +939,17 @@ void ExportSettings(HWND owner) {
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return;
     SaveAll();  // What is typed in the window goes along.
+    // "Start with Windows" and the output of each app are kept by Windows: they go into the file for a moment.
+    Wh_SetStringValue(EXPORT_ROUTES_VALUE, CollectAppRoutes().c_str());
+    Wh_SetIntValue(EXPORT_AUTOSTART_VALUE, AutostartEnabled() ? 1 : 0);
     headroom::MarkDirty();
     headroom::FlushStore();
-    if (!CopyFileW(headroom::StorePath().c_str(), file, FALSE)) {
+    bool copied = CopyFileW(headroom::StorePath().c_str(), file, FALSE) != FALSE;
+    Wh_DeleteValue(EXPORT_ROUTES_VALUE);
+    Wh_DeleteValue(EXPORT_AUTOSTART_VALUE);
+    headroom::MarkDirty();
+    headroom::FlushStore();
+    if (!copied) {
         MessageBoxW(owner, L"The file could not be written.", L"Headroom", MB_OK | MB_ICONWARNING);
     }
 }
@@ -897,6 +976,19 @@ void ImportSettings(HWND owner) {
     }
     KeepBackupBeforeReplacing();
     headroom::ReplaceStore(data);
+    {
+        // What the export took along from Windows: the output of each app and "Start with Windows".
+        std::vector<wchar_t> routes(1 << 18);
+        Wh_GetStringValue(EXPORT_ROUTES_VALUE, routes.data(), routes.size());
+        routes.back() = L'\0';
+        if (routes[0]) RestoreAppRoutes(routes.data());
+        int autostart = Wh_GetIntValue(EXPORT_AUTOSTART_VALUE, -1);
+        if (autostart >= 0) SetAutostart(autostart != 0);
+        Wh_DeleteValue(EXPORT_ROUTES_VALUE);
+        Wh_DeleteValue(EXPORT_AUTOSTART_VALUE);
+        headroom::MarkDirty();
+        headroom::FlushStore();
+    }
     RestartApp();
 }
 
