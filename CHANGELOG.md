@@ -11,7 +11,7 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
-## Unreleased
+## 2.1.0-alpha4
 - Updates: *Check for updates* in the settings window looks for a newer release on GitHub, downloads it, checks it against the release's checksums and installs it over the running copy (with the setup if installed, by replacing the file if it runs on its own), then restarts.
 - Gain per output: in the Effects page of an output, a switch and a slider raise a quiet device by up to 12 dB (works through Equalizer APO for all sound, or through the mixer's engine for apps that run through it), with a limiter behind it against crackling.
 - Export and import now also carry "Start with Windows" and the output Windows keeps for each app.
