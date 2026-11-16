@@ -8,6 +8,7 @@
 
 #define HEADROOM_STANDALONE 1
 #include "headroom.cpp"
+#include "updater.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -201,7 +202,8 @@ struct SettingsUi {
     int hotTab = -1;
     int drag = -1;
     bool tracking = false;
-    RECT buttons[9]{};  // 6 reset, 7 export, 8 import.
+    RECT buttons[10]{};  // 6 reset, 7 export, 8 import, 9 check for updates.
+    bool updateBusy = false;
     RECT tabs[2]{};
     RECT pathCard{}, hiddenCard{}, outputsCard{};
     RECT addField{};
@@ -437,6 +439,7 @@ void BuildItems() {
     g_ui.buttons[6] = Box(20, y, 150, 34);          // Reset to default.
     g_ui.buttons[7] = Box(180, y, 100, 34);         // Export.
     g_ui.buttons[8] = Box(290, y, 100, 34);         // Import.
+    g_ui.buttons[9] = Box(400, y, 170, 34);         // Check for updates.
     g_ui.width = Scale(880);
     g_ui.height = Scale(y + 34 + 20);
     g_ui.tabs[0] = Box(660 - 20, 16, 100, 30);
@@ -778,6 +781,7 @@ void PaintSettings(HWND window) {
     button(6, L"Reset to default", false);
     button(7, L"Export\u2026", false);
     button(8, L"Import\u2026", false);
+    button(9, g_ui.updateBusy ? L"Working..." : L"Check for updates", false);
 
     g_paintMatte = matte;
     BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -803,7 +807,7 @@ Hit HitTest(POINT point) {
         }
         return hit;
     }
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < 10; ++i) {
         if (i == 4 && !g_ui.otherHidden) continue;
         if (PtInRect(&g_ui.buttons[i], point)) hit.button = i;
     }
@@ -1020,6 +1024,153 @@ void RestartApp() {
     if (HWND mixer = g_hWnd.load()) PostMessageW(mixer, WM_CLOSE, 0, 0);
 }
 
+// --- updates --------------------------------------------------------------------------------------------------------------
+// "Check for updates" asks GitHub for the latest release. If it is newer, it is downloaded, checked against the
+// release's checksums, and put over this one: with the setup when the program was installed, by swapping the file when
+// it runs on its own. Headroom restarts by itself.
+constexpr UINT WM_APP_UPDATE_CHECKED = WM_APP + 61;
+constexpr UINT WM_APP_UPDATE_READY = WM_APP + 62;
+
+struct UpdateResult {
+    bool ok = false;
+    std::wstring error;
+    updater::Release release;
+    std::wstring path;  // The downloaded file.
+    bool setup = false;  // A setup (this copy was installed), or the program itself.
+};
+
+bool RunsFromSetup() {
+    std::wstring self = ExePath();
+    size_t slash = self.find_last_of(L'\\');
+    return slash != std::wstring::npos &&
+           GetFileAttributesW((self.substr(0, slash + 1) + L"unins000.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+DWORD WINAPI UpdateCheckThread(LPVOID parameter) {
+    HWND window = static_cast<HWND>(parameter);
+    auto* result = new UpdateResult;
+    result->ok = updater::FetchLatest(&result->release, &result->error);
+    if (!PostMessageW(window, WM_APP_UPDATE_CHECKED, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    return 0;
+}
+
+struct UpdateDownload {
+    HWND window;
+    updater::Release release;
+    bool setup;
+};
+
+DWORD WINAPI UpdateDownloadThread(LPVOID parameter) {
+    std::unique_ptr<UpdateDownload> job(static_cast<UpdateDownload*>(parameter));
+    auto* result = new UpdateResult;
+    result->release = job->release;
+    result->setup = job->setup;
+    wchar_t temp[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp);
+    std::wstring folder = std::wstring(temp) + L"Headroom-update\\";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    const std::wstring& url = job->setup ? job->release.setupUrl : job->release.exeUrl;
+    std::wstring name = job->setup ? job->release.setupName : L"Headroom.exe";
+    if (url.empty()) {
+        result->error = L"The release has no file for this kind of installation.";
+    } else {
+        result->path = folder + name;
+        result->ok = updater::DownloadChecked(url, name, job->release.sumsUrl, result->path, &result->error);
+    }
+    if (!PostMessageW(job->window, WM_APP_UPDATE_READY, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    return 0;
+}
+
+void StartUpdateCheck(HWND window) {
+    g_ui.updateBusy = true;
+    InvalidateRect(window, nullptr, FALSE);
+    HANDLE thread = CreateThread(nullptr, 0, UpdateCheckThread, window, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        g_ui.updateBusy = false;
+    }
+}
+
+void OnUpdateChecked(HWND window, std::unique_ptr<UpdateResult> result) {
+    g_ui.updateBusy = false;
+    InvalidateRect(window, nullptr, FALSE);
+    if (!result->ok) {
+        MessageBoxW(window, (L"Could not check for updates.\n\n" + result->error).c_str(), L"Headroom",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    std::wstring current = HEADROOM_VERSION_TEXT;
+    std::wstring latest = result->release.tag;
+    if (!latest.empty() && latest[0] == L'v') latest.erase(0, 1);
+    if (updater::CompareVersions(latest, current) <= 0) {
+        MessageBoxW(window, (L"Headroom " + current + L" is up to date.").c_str(), L"Headroom", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    bool setup = RunsFromSetup();
+    std::wstring question = L"Headroom " + latest + L" is available. You have " + current + L".\n\n" +
+                            (setup ? L"Download it and install it over this one?"
+                                   : L"Download it and replace this file with it?") +
+                            L"\n\nHeadroom restarts afterwards. The download is checked against the checksums of the release.";
+    if (MessageBoxW(window, question.c_str(), L"Headroom", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    auto* job = new UpdateDownload{window, result->release, setup};
+    g_ui.updateBusy = true;
+    InvalidateRect(window, nullptr, FALSE);
+    HANDLE thread = CreateThread(nullptr, 0, UpdateDownloadThread, job, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        delete job;
+        g_ui.updateBusy = false;
+    }
+}
+
+void OnUpdateReady(HWND window, std::unique_ptr<UpdateResult> result) {
+    g_ui.updateBusy = false;
+    InvalidateRect(window, nullptr, FALSE);
+    if (!result->ok) {
+        MessageBoxW(window, (L"The update could not be downloaded.\n\n" + result->error).c_str(), L"Headroom",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    bool started = false;
+    if (result->setup) {
+        // The setup closes this copy itself, installs over it and starts the new one (/LAUNCH=1).
+        std::wstring command = L"\"" + result->path + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LAUNCH=1";
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION process{};
+        started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process) != FALSE;
+        if (started) {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    } else {
+        // A running program cannot be overwritten, but it can be renamed: the old file waits next to the new one.
+        std::wstring self = ExePath(), old = self + L".old";
+        if (MoveFileExW(self.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            if (CopyFileW(result->path.c_str(), self.c_str(), FALSE)) {
+                std::wstring command = L"\"" + self + L"\" --restart";
+                STARTUPINFOW startup{sizeof(startup)};
+                PROCESS_INFORMATION process{};
+                started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process) != FALSE;
+                if (started) {
+                    CloseHandle(process.hThread);
+                    CloseHandle(process.hProcess);
+                }
+            } else {
+                MoveFileExW(old.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING);  // Back to how it was.
+            }
+        }
+    }
+    if (!started) {
+        MessageBoxW(window, L"The update was downloaded, but could not be installed. Download it from the releases page instead.",
+                    L"Headroom", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (g_ui.window) DestroyWindow(g_ui.window);
+    if (HWND mixer = g_hWnd.load()) PostMessageW(mixer, WM_CLOSE, 0, 0);
+}
+
 void ShowPage(int page) {
     g_ui.page = page;
     HideInfoTip();
@@ -1222,6 +1373,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
                 ExportSettings(hwnd);
             } else if (hit.button == 8) {
                 ImportSettings(hwnd);
+            } else if (hit.button == 9) {
+                if (!g_ui.updateBusy) StartUpdateCheck(hwnd);
             } else if (hit.button == 3) {
                 WCHAR file[MAX_PATH * 2] = {};
                 OPENFILENAMEW ofn = {sizeof(ofn)};
@@ -1257,6 +1410,12 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
                 ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            return 0;
+        case WM_APP_UPDATE_CHECKED:
+            OnUpdateChecked(hwnd, std::unique_ptr<UpdateResult>(reinterpret_cast<UpdateResult*>(lParam)));
+            return 0;
+        case WM_APP_UPDATE_READY:
+            OnUpdateReady(hwnd, std::unique_ptr<UpdateResult>(reinterpret_cast<UpdateResult*>(lParam)));
             return 0;
         case WM_COMMAND:
             if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hwnd);  // Esc.
@@ -1468,6 +1627,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
     headroom::InitLog();
     headroom::InitStore();
     Wh_Log(L"Headroom %s starting", HEADROOM_VERSION_TEXT);
+    DeleteFileW((ExePath() + L".old").c_str());  // What an update left behind.
     MigrateAutostart();
 
     // The Windhawk mod and this app would both put a tray icon and hotkeys up.

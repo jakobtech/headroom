@@ -12,7 +12,7 @@ clang++ -std=c++23 -Os -s -static -mwindows -municode \
   -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
   src/standalone.cpp bin/app.res.o -o bin/Headroom.exe \
   -lole32 -lshell32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -lmsimg32 -lgdiplus -ld2d1 -ldwrite \
-  -lshlwapi -lcomctl32 -lcomdlg32 -luxtheme -lshcore -luuid -loleaut32 -lversion -lmmdevapi
+  -lshlwapi -lcomctl32 -lcomdlg32 -luxtheme -lshcore -luuid -loleaut32 -lversion -lmmdevapi -lwinhttp
 
 ls -l bin/Headroom.exe
 sha256sum bin/Headroom.exe

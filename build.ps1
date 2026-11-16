@@ -53,7 +53,7 @@ if ($rc) {
 $link = @('-Os', '-s', '-static', '-mwindows', '-municode',
           '-lole32', '-lshell32', '-lgdi32', '-luser32', '-ldwmapi', '-ladvapi32', '-lmsimg32',
           '-lgdiplus', '-ld2d1', '-ldwrite', '-lshlwapi', '-lcomctl32', '-lcomdlg32', '-luxtheme',
-          '-lshcore', '-luuid', '-loleaut32', '-lversion', '-lmmdevapi')
+          '-lshcore', '-luuid', '-loleaut32', '-lversion', '-lmmdevapi', '-lwinhttp')
 $extra = @()
 if (Test-Path $res) { $extra += $res }
 & $clang @common @link $src @extra '-o' $exe

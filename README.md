@@ -47,6 +47,7 @@ It is a single small program (under 1 MB, no installer, no framework) written in
 | **Microphone tab** | Default microphone with volume and mute, every input, and the apps that record right now |
 | **Volume at startup** | Set an app or a device to a fixed volume whenever it starts |
 | **Mute hotkeys** | Per app, also while the mixer is closed and while you play |
+| **Updates** | *Check for updates* in the settings: downloads, checks and installs a newer release, then restarts |
 | **Tidy** | Rename, hide (for now or for good) apps, devices and System sounds |
 | **Look** | Light, dark or Windows theme, Windows 11 or 10 style, blur, compact mode |
 

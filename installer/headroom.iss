@@ -58,6 +58,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\Headroom.exe"; Description: "{cm:LaunchProgram,Headroom}"; Flags: nowait postinstall skipifsilent
+; The program's own update runs the setup silently with /LAUNCH=1 and wants the new version started afterwards.
+Filename: "{app}\Headroom.exe"; Flags: nowait; Check: LaunchRequested
 
 [Code]
 // Asks a running Headroom to close the way its tray menu does, so that every app is routed back to its output.
@@ -79,6 +81,11 @@ begin
     if FindWindowByClassName('HeadroomMixer') <> 0 then
       Exec('taskkill.exe', '/IM Headroom.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
+end;
+
+function LaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:launch|0}') = '1';
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
