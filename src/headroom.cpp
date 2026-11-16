@@ -9162,7 +9162,7 @@ void EnsureSinkSurround(bool wanted) {
             Wh_SetIntValue(L"sinkSurround_v1", 1);
             g_sinkChangedAt = GetTickCount64();
         }
-    } else if (!wanted && g_sinkSurroundByUs && channels == SURROUND_CHANNELS) {
+    } else if (!wanted && channels == SURROUND_CHANNELS) {  // Also if the flag was lost, for example by a reset.
         if (SetSinkChannels(g_fxSinkId, 2)) {
             g_sinkSurroundByUs = false;
             Wh_DeleteValue(L"sinkSurround_v1");
