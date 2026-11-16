@@ -12,6 +12,7 @@ git revert <commit>             # undo one change, keep the history
 ```
 
 ## Unreleased
+- Gain per output: in the Effects page of an output, a switch and a slider raise a quiet device by up to 12 dB (works through Equalizer APO for all sound, or through the mixer's engine for apps that run through it), with a limiter behind it against crackling.
 - Export and import now also carry "Start with Windows" and the output Windows keeps for each app.
 - Before a reset or an import replaces the settings, a copy is kept as `settings.before-replace.cfg`.
 - The silent output goes back to stereo whenever no app needs surround sound, also after a reset.

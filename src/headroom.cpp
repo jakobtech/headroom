@@ -7832,6 +7832,36 @@ struct LoudMaxInstance {
 // An output's equalizer and LoudMax run in Equalizer APO when it is installed
 // (no extra delay), and in the mixer's own engine when it is not, or when the
 // settings ask for that.
+// The gain of an output: everything that plays on it is raised by up to 12 dB, for a device that is too quiet.
+// A limiter (the mixer's own, or LoudMax) catches the peaks, which would crackle otherwise.
+// Kept as "on;tenths of a decibel" under "devGain_v1:<output GUID>".
+struct DeviceGain {
+    bool on = false;
+    int tenths = 0;  // 0 to DEVICE_GAIN_MAX.
+};
+constexpr int DEVICE_GAIN_MAX = 120;
+
+bool DeviceGainActive(const DeviceGain& gain) {
+    return gain.on && gain.tenths > 0;
+}
+
+DeviceGain LoadDeviceGain(const std::wstring& guid) {
+    DeviceGain gain;
+    wchar_t buffer[32]{};
+    Wh_GetStringValue((L"devGain_v1:" + guid).c_str(), buffer, ARRAYSIZE(buffer));
+    buffer[ARRAYSIZE(buffer) - 1] = L'\0';
+    if (!buffer[0]) return gain;
+    gain.on = buffer[0] == L'1';
+    const wchar_t* semicolon = wcschr(buffer, L';');
+    if (semicolon) gain.tenths = std::clamp(static_cast<int>(wcstol(semicolon + 1, nullptr, 10)), 0, DEVICE_GAIN_MAX);
+    return gain;
+}
+
+void SaveDeviceGain(const std::wstring& guid, const DeviceGain& gain) {
+    std::wstring stored = std::wstring(gain.on ? L"1;" : L"0;") + std::to_wstring(gain.tenths);
+    Wh_SetStringValue((L"devGain_v1:" + guid).c_str(), stored.c_str());
+}
+
 bool UseApoForDevices() {
     if (g_settings.deviceEffects == L"builtin") return false;
     return !EqualizerApoFolder().empty();
@@ -7855,7 +7885,9 @@ bool WriteEqualizerConfig() {
         EqualizerState state = LoadEqualizer(guid);
         LoudMaxState limiter = LoadLoudMax(L"dev:" + guid);
         bool limit = loudMax && limiter.on;
-        if (!state.on && !limit) continue;
+        DeviceGain boost = LoadDeviceGain(guid);
+        bool boosted = DeviceGainActive(boost);
+        if (!state.on && !limit && !boosted) continue;
         if (!state.on) state = EqualizerState();
         int highest = 0;
         for (int gain : state.gains) highest = std::max(highest, gain);
@@ -7866,7 +7898,7 @@ bool WriteEqualizerConfig() {
         text += std::string("Device: ") + line + "\r\n";
         // Without a limiter after it, Equalizer APO would clip the boosts, so it
         // gets headroom; with LoudMax limiting, the bands simply add.
-        snprintf(line, sizeof(line), "Preamp: %.1f dB\r\n", limit ? 0.0 : -highest / 10.0);
+        snprintf(line, sizeof(line), "Preamp: %.1f dB\r\n", (boosted ? boost.tenths / 10.0 : 0.0) + (limit ? 0.0 : -highest / 10.0));
         text += line;
         const EqLayout& layout = EqLayoutFor(state.bands);
         for (int band = 0; band < layout.count; ++band) {
@@ -8235,11 +8267,12 @@ FxSettings ReadFxSettings(const std::wstring& exe) {
 struct DeviceFx {
     EqualizerState eq;
     LoudMaxState loudMax;
+    DeviceGain gain;
 };
 std::unordered_map<std::wstring, DeviceFx> g_deviceFx;  // By output GUID, under g_fxLock.
 
 bool DeviceFxActive(const DeviceFx& fx) {
-    if (fx.loudMax.on) return true;
+    if (fx.loudMax.on || DeviceGainActive(fx.gain)) return true;
     if (!fx.eq.on) return false;
     for (int gain : fx.eq.gains) {
         if (gain) return true;
@@ -8256,6 +8289,7 @@ void PublishDeviceFx() {
             DeviceFx fx;
             fx.eq = LoadEqualizer(guid);
             fx.loudMax = LoadLoudMax(L"dev:" + guid);
+            fx.gain = LoadDeviceGain(guid);
             if (!LoudMaxForOutputs()) fx.loudMax.on = false;
             next[guid] = std::move(fx);
         }
@@ -8479,8 +8513,10 @@ struct FxChain {
     // The output's own equalizer, when the mixer's engine does it.
     Biquad deviceBands[EQ_MAX_BANDS];
     bool deviceEq = false;
+    float deviceGain = 1.0f;
 
-    void ConfigureDevice(const EqualizerState& eq, double rate) {
+    void ConfigureDevice(const EqualizerState& eq, const DeviceGain& gain, double rate) {
+        deviceGain = DeviceGainActive(gain) ? static_cast<float>(std::pow(10.0, gain.tenths / 200.0)) : 1.0f;
         const EqLayout& layout = EqLayoutFor(eq.bands);
         deviceEq = false;
         for (int band = 0; band < EQ_MAX_BANDS; ++band) {
@@ -8504,6 +8540,7 @@ struct FxChain {
                         if (band.active) x = RunBiquad(band, channel, x);
                     }
                 }
+                x *= deviceGain;
                 samples[i * 2 + channel] = limit ? SoftLimit(x / ceiling) * ceiling : x;
             }
         }
@@ -8768,7 +8805,7 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     auto refreshDevice = [&]() {
         deviceFx = g_deviceFxBuiltIn && !render.deviceId.empty()
                        ? ReadDeviceFx(EndpointGuid(render.deviceId)) : DeviceFx{};
-        chain.ConfigureDevice(deviceFx.eq, rate);
+        chain.ConfigureDevice(deviceFx.eq, deviceFx.gain, rate);
         deviceStage = DeviceFxActive(deviceFx);
         if (deviceFx.loudMax.on && !deviceLoudMax.effect && !deviceLoudMax.Open(rate)) {
             Wh_Log(L"Mixer: LoudMax did not load for the output of %s", stream->exe.c_str());
@@ -9680,6 +9717,9 @@ struct EqualizerPanel {
     ULONGLONG channelSaved = 0;
     bool namingLoud = false;    // The name being typed is for a loudness preset.
     ChannelMixState channels;   // Apps only: which surround channels are left out.
+    DeviceGain gain;            // Outputs only.
+    bool gainDrag = false;
+    ULONGLONG gainSaved = 0;
     ULONGLONG expertSaved = 0;
     bool dirty = false;
     ULONGLONG written = 0;
@@ -9693,7 +9733,8 @@ enum EqControl {
     EQ_LOUDNESS_TOGGLE, EQ_RELEASE_FIRST, EQ_LAYOUT_FIRST = EQ_RELEASE_FIRST + 6,
     EQ_EXPERT_RESET = EQ_LAYOUT_FIRST + 16, EQ_LOUD_PRESETS, EQ_EXPERT_FIRST,
     EQ_CHANNELS_TOGGLE = EQ_EXPERT_FIRST + LOUD_PARAMS, EQ_CHANNEL_FIRST,
-    EQ_INFO_LOUDMAX = EQ_CHANNEL_FIRST + SURROUND_CHANNELS, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_FIRST,
+    EQ_GAIN_TOGGLE = EQ_CHANNEL_FIRST + SURROUND_CHANNELS, EQ_GAIN_SLIDER,
+    EQ_INFO_LOUDMAX, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_GAIN, EQ_INFO_FIRST,
 };
 
 // Where everything sits, for the current page.
@@ -9708,6 +9749,7 @@ struct EqGeometry {
     RECT loudCaption, loudPresets;
     RECT infoLoudMax, infoLoudness, info[LOUD_PARAMS];  // The (i) marks.
     RECT channelsRow, channelsToggle, infoChannels, channelCaption, channelChip[SURROUND_CHANNELS];
+    RECT gainRow, gainToggle, infoGain, gainValue, gainTrack, gainNote;
     RECT footer;
     int height;
 };
@@ -9717,7 +9759,7 @@ constexpr int EQ_STRIP_LAYOUTS = static_cast<int>(ARRAYSIZE(EQ_LAYOUTS)) - 1;
 constexpr int EQ_SEGMENT = 52;  // One band count in the strip.
 
 bool EqHasEffects() {
-    return g_eq.loudMaxShown || !g_eq.app.empty();
+    return true;  // Outputs have a gain, apps have more.
 }
 
 EqGeometry EqMeasure(int width) {
@@ -9735,6 +9777,17 @@ EqGeometry EqMeasure(int width) {
             at.infoLoudMax = {Scale(12) + Scale(84), middle - Scale(9), Scale(12) + Scale(102),
                               middle + Scale(9)};
             y += Scale(56);
+        }
+        if (g_eq.app.empty()) {
+            // The gain of the output: a switch, the value, and a slider.
+            at.gainRow = {Scale(12), y, width - Scale(12), y + Scale(112)};
+            int middle = y + Scale(26);
+            at.gainToggle = {width - Scale(66), middle - Scale(10), width - Scale(26), middle + Scale(10)};
+            at.infoGain = {Scale(12) + Scale(64), middle - Scale(9), Scale(12) + Scale(82), middle + Scale(9)};
+            at.gainValue = {at.gainToggle.left - Scale(110), y + Scale(10), at.gainToggle.left - Scale(10), y + Scale(42)};
+            at.gainTrack = {Scale(28), y + Scale(52), width - Scale(28), y + Scale(74)};
+            at.gainNote = {Scale(28), y + Scale(78), width - Scale(28), y + Scale(102)};
+            y += Scale(116);
         }
         if (!g_eq.app.empty()) {
             bool custom = g_eq.loudness.release == 4;
@@ -9840,6 +9893,14 @@ const wchar_t* EqInfoText(int control) {
                L"when it starts). While it is on, the silent VB-CABLE output is set to 7.1; it goes "
                L"back to stereo when no app uses it. Apps that play stereo are not changed.";
     }
+    if (control == EQ_INFO_GAIN) {
+        return L"Raises everything that plays on this output, by up to 12 dB, for a device that is too "
+               L"quiet. With Equalizer APO it works for all sound, system sounds included. With the mixer's own "
+               L"engine it works for apps that run through the mixer. Sound above full scale would crackle, so "
+               L"a limiter catches the peaks: the mixer's own soft limiter, or LoudMax when it is on. Above about "
+               L"+6 dB loud sounds start to sound squashed. The volumes in Windows and in the app still decide the "
+               L"final loudness: try it quietly first.";
+    }
     if (control == EQ_INFO_LOUDNESS) {
         return L"Keeps this app's volume even: loud sounds are turned down, quiet ones raised. Choose "
                L"a ready-made speed (Comp is made for games: quiet footsteps come up, shots and explosions are cut "
@@ -9859,7 +9920,7 @@ void UpdateEqInfoTip(int control) {
         HideInfoTip();
         return;
     }
-    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS &&
+    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS && control != EQ_INFO_GAIN &&
         (control < EQ_INFO_FIRST || control >= EQ_INFO_FIRST + LOUD_PARAMS)) {
         HideInfoTip();
         return;
@@ -9867,6 +9928,7 @@ void UpdateEqInfoTip(int control) {
     RECT rect = control == EQ_INFO_LOUDMAX ? g_eqAt.infoLoudMax
               : control == EQ_INFO_LOUDNESS ? g_eqAt.infoLoudness
               : control == EQ_INFO_CHANNELS ? g_eqAt.infoChannels
+              : control == EQ_INFO_GAIN ? g_eqAt.infoGain
                                             : g_eqAt.info[control - EQ_INFO_FIRST];
     MapWindowPoints(g_eq.window, nullptr, reinterpret_cast<POINT*>(&rect), 2);
     ShowInfoTip(g_eq.window, rect, EqInfoText(control));
@@ -9920,6 +9982,11 @@ int EqControlAt(POINT point) {
             if (PtInRect(&at.loudMaxToggle, point)) return EQ_LM_TOGGLE;
             if (PtInRect(&at.infoLoudMax, point)) return EQ_INFO_LOUDMAX;
             if (PtInRect(&at.loudMaxSettings, point)) return EQ_LM_SETTINGS;
+        }
+        if (g_eq.app.empty()) {
+            if (PtInRect(&at.gainToggle, point)) return EQ_GAIN_TOGGLE;
+            if (PtInRect(&at.infoGain, point)) return EQ_INFO_GAIN;
+            if (PtInRect(&at.gainTrack, point)) return EQ_GAIN_SLIDER;
         }
         if (!g_eq.app.empty()) {
             if (PtInRect(&at.loudnessToggle, point)) return EQ_LOUDNESS_TOGGLE;
@@ -10108,6 +10175,34 @@ void ChannelTrack(int index, float* top, float* bottom, float* x) {
     *top = chip.top + Scale(22) + inset;
     *bottom = chip.bottom - Scale(22) - inset;
     *x = (chip.left + chip.right) / 2.0f;
+}
+
+void PaintEqualizer();
+
+// The track of the gain, from 0 on the left to the most on the right.
+void GainTrack(float* left, float* right, float* y) {
+    const RECT& area = g_eqAt.gainTrack;
+    float inset = SliderThumbWidth() / 2;
+    *left = area.left + inset;
+    *right = area.right - inset;
+    *y = (area.top + area.bottom) / 2.0f;
+}
+
+// Drags the gain: in steps of half a decibel, saved and handed on at most every 100 ms.
+void SetGainFromPoint(POINT point, bool now) {
+    float left, right, y;
+    GainTrack(&left, &right, &y);
+    double t = std::clamp((point.x - left) / std::max(1.0f, right - left), 0.0f, 1.0f);
+    g_eq.gain.tenths = static_cast<int>(std::lround(t * (DEVICE_GAIN_MAX / 5))) * 5;
+    g_eq.gain.on = g_eq.gain.tenths > 0 ? true : g_eq.gain.on;
+    ULONGLONG tick = GetTickCount64();
+    if (now || tick - g_eq.gainSaved >= 100) {
+        g_eq.gainSaved = tick;
+        SaveDeviceGain(g_eq.guid, g_eq.gain);
+        AddEqualizerDevice(g_eq.guid);
+        g_eq.failed = !WriteEqualizerConfig();
+    }
+    PaintEqualizer();
 }
 
 double LoudValueAt(int index, double t) {
@@ -10330,6 +10425,35 @@ void DrawEqualizer(HDC dc, const RECT& client) {
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             DrawEqToggle(dc, g, at.loudMaxToggle, g_eq.loudMax.on, g_eq.control == EQ_LM_TOGGLE);
         }
+    }
+
+    // The gain of an output.
+    if (g_eq.effects && g_eq.app.empty()) {
+        const RECT& row = at.gainRow;
+        DrawSurface(dc, row, Radius(16), g_theme.panel);
+        RECT name{row.left + Scale(16), row.top + Scale(8), at.infoGain.left - Scale(4), row.top + Scale(44)};
+        DrawLabel(dc, L"Gain", name, g_bodyFont, g_theme.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawInfoMark(dc, at.infoGain, g_eq.control == EQ_INFO_GAIN);
+        wchar_t value[32];
+        swprintf_s(value, L"+%.1f dB", g_eq.gain.tenths / 10.0);
+        DrawLabel(dc, value, at.gainValue, g_bodyFont, g_eq.gain.on ? g_theme.text : g_theme.secondaryText,
+                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawEqToggle(dc, g, at.gainToggle, g_eq.gain.on, g_eq.control == EQ_GAIN_TOGGLE);
+        float left, right, y;
+        GainTrack(&left, &right, &y);
+        float position = left + (right - left) * g_eq.gain.tenths / DEVICE_GAIN_MAX;
+        ThumbState thumb = g_eq.gainDrag ? ThumbState::Pressed
+                           : g_eq.control == EQ_GAIN_SLIDER ? ThumbState::Hover : ThumbState::Rest;
+        DrawEqHSlider(dc, g, left, right, y, position, thumb, g_eq.gain.on);
+        bool limiter = !UseApoForDevices() || (g_eq.loudMaxShown && g_eq.loudMaxUsable && g_eq.loudMax.on);
+        PCWSTR note = !g_eq.gain.on ? L"Raises the volume of an output that is too quiet."
+                    : !limiter && g_eq.gain.tenths >= 30
+                        ? L"No limiter: loud sounds can crackle. Turn LoudMax on above."
+                    : g_eq.gain.tenths >= 60 ? L"High gain: loud sounds can sound squashed."
+                    : L"A limiter catches the peaks.";
+        bool warn = g_eq.gain.on && ((!limiter && g_eq.gain.tenths >= 30) || g_eq.gain.tenths >= 60);
+        DrawLabel(dc, note, at.gainNote, g_smallFont, warn ? g_theme.accent : g_theme.secondaryText,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     // Loudness equalization: the mixer's own, for this app alone.
@@ -10744,6 +10868,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
         }
     }
     g_eq.loudMax = LoadLoudMax(EqLoudMaxKey());
+    if (app.empty()) g_eq.gain = LoadDeviceGain(g_eq.guid);
     if (g_eq.state.bands > 15) {
         g_eq.state = ResampleEqualizer(g_eq.state, 15);
         g_eq.dirty = true;
@@ -10808,6 +10933,10 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     SetChannelFromPoint(point);
                     continue;
                 }
+                if (g_eq.gainDrag) {
+                    SetGainFromPoint(point, false);
+                    continue;
+                }
                 int band = EqBandAt(point);
                 int control = EqControlAt(point);
                 if (band != g_eq.hover || control != g_eq.control) {
@@ -10822,7 +10951,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                 if (msg.hwnd != panel) break;
                 tracking = false;
                 HideInfoTip();
-                if (g_eq.drag < 0 && g_eq.expertDrag < 0 && g_eq.channelDrag < 0 && (g_eq.hover >= 0 || g_eq.control >= 0)) {
+                if (g_eq.drag < 0 && g_eq.expertDrag < 0 && g_eq.channelDrag < 0 && !g_eq.gainDrag && (g_eq.hover >= 0 || g_eq.control >= 0)) {
                     g_eq.hover = -1;
                     g_eq.control = -1;
                     PaintEqualizer();
@@ -10879,6 +11008,17 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     ShowLoudPresetMenu(owner);
                 } else if (control >= EQ_INFO_LOUDMAX) {
                     // The (i) marks only explain, on hover.
+                } else if (control == EQ_GAIN_TOGGLE) {
+                    g_eq.gain.on = !g_eq.gain.on;
+                    if (g_eq.gain.on && g_eq.gain.tenths == 0) g_eq.gain.tenths = 30;  // Starts at +3 dB.
+                    SaveDeviceGain(g_eq.guid, g_eq.gain);
+                    AddEqualizerDevice(g_eq.guid);
+                    g_eq.failed = !WriteEqualizerConfig();
+                    PaintEqualizer();
+                } else if (control == EQ_GAIN_SLIDER) {
+                    g_eq.gainDrag = true;
+                    SetCapture(panel);
+                    SetGainFromPoint(point, false);
                 } else if (control == EQ_CHANNELS_TOGGLE) {
                     g_eq.channels.on = !g_eq.channels.on;
                     SaveChannelMix(g_eq.app, g_eq.channels);
@@ -10913,6 +11053,11 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                 continue;
             }
             case WM_LBUTTONUP:
+                if (g_eq.gainDrag) {
+                    g_eq.gainDrag = false;
+                    ReleaseCapture();
+                    SetGainFromPoint(point, true);
+                }
                 if (g_eq.channelDrag >= 0) {
                     g_eq.channelDrag = -1;
                     ReleaseCapture();
@@ -11068,7 +11213,7 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
     items.push_back({L"", L"Output device", L"\uE7F5", false});
     if (g_flow == eRender) {
         items.push_back({L"", L"Equalizer", L"\uE9E9", g_endpointName.empty()});
-        if (LoudMaxForOutputs()) items.push_back({L"", L"Effects", L"\uE9D9", g_endpointName.empty()});
+        items.push_back({L"", L"Effects", L"\uE9D9", g_endpointName.empty()});
     }
     const std::wstring defaultDeviceId = DefaultDeviceId(g_flow);
     const int startVolume = defaultDeviceId.empty() ? -1 : Wh_GetIntValue(DeviceStartKey(defaultDeviceId).c_str(), -1);
@@ -11369,7 +11514,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         if (g_flow == eRender) {
             add(MOVE_ALL_APPS, L"Move all apps here", L"\uE8AB", false);
             add(EQUALIZER, L"Equalizer", L"\uE9E9", false);
-            if (LoudMaxForOutputs()) add(EFFECTS, L"Effects", L"\uE9D9", false);
+            add(EFFECTS, L"Effects", L"\uE9D9", false);
         }
     } else if (g_flow == eRender) {
         add(OUTPUT, L"Output device", L"\uE7F5", !routable);
