@@ -850,6 +850,13 @@ std::string ReadWholeFile(const std::wstring& path) {
 // Everything the app keeps (settings, equalizers, loudness, hidden lists ...) in one file.
 void RestartApp();
 
+// A copy of everything, made before a reset or an import replaces it: the last way back.
+void KeepBackupBeforeReplacing() {
+    headroom::MarkDirty();
+    headroom::FlushStore();
+    CopyFileW(headroom::StorePath().c_str(), (headroom::DataDir() + L"\\settings.before-replace.cfg").c_str(), FALSE);
+}
+
 void ExportSettings(HWND owner) {
     WCHAR file[MAX_PATH * 2] = L"Headroom settings.cfg";
     OPENFILENAMEW ofn = {sizeof(ofn)};
@@ -888,6 +895,7 @@ void ImportSettings(HWND owner) {
                     L"Headroom", MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return;
     }
+    KeepBackupBeforeReplacing();
     headroom::ReplaceStore(data);
     RestartApp();
 }
@@ -897,11 +905,12 @@ void ResetEverything(HWND owner) {
     if (MessageBoxW(owner,
                     L"Reset everything to default?\n\n"
                     L"All settings, equalizers, loudness settings, surround channels, start volumes, names and "
-                    L"hidden lists are deleted. This cannot be undone. Use Export first if you want to keep them.\n\n"
+                    L"hidden lists are deleted. A copy is kept as settings.before-replace.cfg in the settings folder, until the next reset or import. Use Export to keep it for good.\n\n"
                     L"Headroom restarts afterwards.",
                     L"Reset to default", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         return;
     }
+    KeepBackupBeforeReplacing();
     headroom::ReplaceStore("");
     RestartApp();
 }
