@@ -10155,12 +10155,6 @@ void DrawEqSegments(HDC dc, const RECT* segments, int count, const PCWSTR* label
         DrawLabel(dc, labels[i], segment, g_bodyFont,
                   selected ? g_theme.text : g_theme.secondaryText,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        if (selected) {
-            int middle = (segment.left + segment.right) / 2;
-            RECT bar{middle - Scale(8), segment.bottom - Scale(6), middle + Scale(8),
-                     segment.bottom - Scale(3)};
-            DrawRoundedRect(dc, bar, Radius(3), g_theme.accent);
-        }
     }
 }
 
