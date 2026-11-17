@@ -11,7 +11,7 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
-## Unreleased
+## 2.1.0-alpha5
 - Inputs: a line-in (or any input) can be listened to through Headroom. In the microphone tab, open the device list, right-click the input and choose *Listen through Headroom*. It then shows up in the playback list like an app, with its own volume, mute, output, equalizer, loudness equalization, LoudMax and gain.
 - Settings: an *Apply* button puts the changes into effect without closing the window.
 - Settings: *Open the mixer with a key*: a key combination that opens (and closes) the mixer from anywhere, at the bottom right of the monitor the mouse is on. Windows shows the tray icon only on the main monitor's taskbar.
