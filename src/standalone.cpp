@@ -133,6 +133,7 @@ struct Option {
 constexpr Option kThemeOptions[] = {{L"system", L"Windows"}, {L"dark", L"Dark"}, {L"light", L"Light"}};
 constexpr Option kStyleOptions[] = {{L"windows11", L"Windows 11"}, {L"windows10", L"Windows 10"}};
 constexpr Option kEffectOptions[] = {{L"glass", L"Frosted"}, {L"blur", L"Blur"}, {L"none", L"None"}};
+constexpr Option kApoOptions[] = {{L"auto", L"On"}, {L"builtin", L"Off"}};
 constexpr Option kRowsOptions[] = {{L"auto", L"Fill"}, {L"5", L"5"},   {L"7", L"7"},
                                    {L"10", L"10"},     {L"15", L"15"}, {L"20", L"20"}};
 
@@ -170,6 +171,7 @@ PCWSTR SettingInfo(const std::wstring& name) {
         {L"moveNotifications", L"While the mixer is open, Windows notifications that would cover it are moved aside, and come back when it closes."},
         {L"showIdleAppsOnAllOutputs", L"Lists apps that are silent even when their audio goes to an output other than the default one, for example Steam after you switched from headset to speakers. Off: such apps are listed once they play something."},
         {L"showAllSessions", L"Shows every audio session separately per output, including unused ones, instead of one row per app. Most people leave this off."},
+        {L"deviceEffects", L"Equalizer APO is a free equalizer for the whole of Windows. On: the equalizer, gain and LoudMax of an output run in Equalizer APO when it is installed and set up for that output: no delay, and all sound, system sounds included. Off: Headroom's own engine does them, only for apps that run through Headroom, with about 40 ms delay. Equalizers of apps and inputs always use Headroom's engine."},
         {L"volumeStep", L"How many percent one step of the mouse wheel changes, over an app row, the master volume or the tray icon. 1 to 20; 5 is usual."},
     };
     for (const Entry& entry : entries) {
@@ -391,6 +393,7 @@ void BuildItems() {
         toggle(L"Silent apps on every output", L"showIdleAppsOnAllOutputs"),
         toggle(L"Show all audio sessions", L"showAllSessions"),
         slider(L"Mouse-wheel step", L"volumeStep", 1, 20, L" %"),
+        segments(L"Equalizer APO", L"deviceEffects", kApoOptions, 2),
     };
     const int columnWidth = 410, rowHeight = 44, rowStep = 48, top = 76;
     for (int column = 0; column < 2; ++column) {
@@ -422,7 +425,7 @@ void BuildItems() {
             g_ui.items.push_back(item);
         }
     }
-    int y = top + 8 * rowStep + 4;
+    int y = top + static_cast<int>(std::max(left.size(), right.size())) * rowStep + 4;
     g_ui.pathCard = Box(20, y, 840, 96);
     g_ui.buttons[3] = Box(20 + 840 - 104, y + 52, 92, 30);  // Browse.
     y += 106;

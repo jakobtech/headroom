@@ -308,6 +308,7 @@ struct AppSession {
     bool loudnessOn = false;  // And loudness equalization.
     int startVolume = -1;     // The volume it is set to at startup, if any: shown as a badge.
     bool channelsOn = false;  // Surround channels are in use.
+    bool virtualInput = false;  // An input listened to through the mixer: no Windows session behind it.
 
     bool IsDevice() const { return !deviceId.empty(); }
 
@@ -350,6 +351,7 @@ struct AppSession {
             loudnessOn = other.loudnessOn;
             startVolume = other.startVolume;
             channelsOn = other.channelsOn;
+            virtualInput = other.virtualInput;
             other.deviceVolume = nullptr;
             other.icon = nullptr;
             other.volumeControls.clear();
@@ -1591,6 +1593,9 @@ std::wstring ExeFileName(const std::wstring& path) {
 }
 
 void FxSettingsChanged(const std::wstring& exe);
+void SetMonitorVolume(const std::wstring& key, float volume);
+void SetMonitorMuted(const std::wstring& key, bool muted);
+void AppendMonitorRows();
 
 // Kept in the mod's storage as one "name|percent" line per app.
 void LoadBoost() {
@@ -2608,6 +2613,8 @@ void RefreshAudioSessions(HWND hWnd, bool diagnostics = false) {
     if (renderDefault) renderDefault->Release();
     enumerator->Release();
 
+    if (g_flow == eRender && buildRows) AppendMonitorRows();
+
     if (g_flow == eRender) {
         PruneDefaultVolumes(completeScan);
         PrunePlaybackHistory();
@@ -2619,7 +2626,7 @@ void RefreshAudioSessions(HWND hWnd, bool diagnostics = false) {
         return !app.listed || app.hidden;
     });
     for (auto& app : *g_apps) {
-        if (!app.IsDevice()) app.icon = GetExecutableIcon(app.executablePath);
+        if (!app.IsDevice() && !app.virtualInput) app.icon = GetExecutableIcon(app.executablePath);
     }
     for (auto& app : *g_apps) {
         if (g_flow != eRender) break;  // Effects belong to playback.
@@ -2856,6 +2863,13 @@ void SetRowVolume(int row, float value) {
         return;
     }
     AppSession& app = (*g_apps)[row];
+    if (app.virtualInput) {
+        // A listened-to input has no Windows session: its volume is the mixer's own.
+        SetMonitorVolume(app.executablePath, value);
+        app.volume = value;
+        if (value > 0.0f) app.muted = false;
+        return;
+    }
     if (app.deviceVolume) {
         if (!app.deviceId.empty()) {
             QueueDeviceVolume(app.deviceId, value);  // The slider does not wait for the hardware.
@@ -2905,6 +2919,11 @@ void ToggleRowMute(int row) {
         return;
     }
     AppSession& app = (*g_apps)[row];
+    if (app.virtualInput) {
+        app.muted = !app.muted;
+        SetMonitorMuted(app.executablePath, app.muted);
+        return;
+    }
     bool newMuted = !app.muted;
     if (app.deviceVolume) {
         app.deviceVolume->SetMute(newMuted, nullptr);
@@ -8290,6 +8309,56 @@ std::wstring CaptureDeviceId(const std::wstring& guid) {
     return found;
 }
 
+// The volume and mute of a listened-to input, the mixer's own: 0 to 100 %.
+float MonitorVolume(const std::wstring& guid) {
+    return std::clamp(Wh_GetIntValue((L"monitorVol_v1:" + guid).c_str(), 100), 0, 100) / 100.0f;
+}
+
+bool MonitorMuted(const std::wstring& guid) {
+    return Wh_GetIntValue((L"monitorMute_v1:" + guid).c_str(), 0) != 0;
+}
+
+void SetMonitorVolume(const std::wstring& key, float volume) {
+    std::wstring guid = InputGuid(key);
+    Wh_SetIntValue((L"monitorVol_v1:" + guid).c_str(), static_cast<int>(std::lround(std::clamp(volume, 0.0f, 1.0f) * 100.0f)));
+    if (volume > 0.0f) Wh_SetIntValue((L"monitorMute_v1:" + guid).c_str(), 0);
+    FxSettingsChanged(key);
+}
+
+void SetMonitorMuted(const std::wstring& key, bool muted) {
+    Wh_SetIntValue((L"monitorMute_v1:" + InputGuid(key)).c_str(), muted ? 1 : 0);
+    FxSettingsChanged(key);
+}
+
+// An input that is listened to shows up in the playback list like an app: with its volume, mute, output,
+// equalizer and effects.
+void AppendMonitorRows() {
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator)))) {
+        return;
+    }
+    for (const std::wstring& guid : MonitorGuids()) {
+        std::wstring id = CaptureDeviceId(guid);
+        IMMDevice* device = nullptr;
+        if (id.empty() || FAILED(enumerator->GetDevice(id.c_str(), &device)) || !device) continue;
+        AppSession row;
+        row.virtualInput = true;
+        row.executablePath = L"in:" + guid;  // The name its settings are kept under.
+        row.pinKey = L"input:" + guid;
+        row.listed = true;
+        row.active = true;
+        row.pinned = Wh_GetIntValue(row.pinKey.c_str(), 0) != 0;
+        const std::wstring& renamed = StoredSourceName(row.pinKey);
+        row.name = renamed.empty() ? ReadEndpointName(device) : renamed;
+        row.volume = MonitorVolume(guid);
+        row.muted = MonitorMuted(guid);
+        device->Release();
+        g_apps->push_back(std::move(row));
+    }
+    enumerator->Release();
+}
+
 struct FxSettings {
     float gain = 1.0f;
     EqualizerState eq;
@@ -8326,7 +8395,8 @@ FxSettings BuildFxSettings(const std::wstring& exe) {
     settings.target = target == FX_FOLLOW_DEFAULT ? std::wstring() : target;
     if (IsInputKey(exe)) {
         DeviceGain boost = LoadDeviceGain(InputGuid(exe));
-        settings.gain = DeviceGainActive(boost) ? static_cast<float>(std::pow(10.0, boost.tenths / 200.0)) : 1.0f;
+        float volume = MonitorMuted(InputGuid(exe)) ? 0.0f : MonitorVolume(InputGuid(exe));
+        settings.gain = (DeviceGainActive(boost) ? static_cast<float>(std::pow(10.0, boost.tenths / 200.0)) : 1.0f) * volume;
     }
     return settings;
 }
@@ -11479,9 +11549,63 @@ void ReleaseAppOutput(HWND window, int row) {
 }
 
 // The output list for one app: the Windows default first, then each output.
+// The output a listened-to input plays on: the default one, or a chosen output.
+void ShowMonitorOutputPicker(HWND window, int row) {
+    if (g_outputMenuOpen || g_dragRow != DRAG_NONE || row < 0 || row >= static_cast<int>(g_apps->size())) return;
+    const std::wstring key = (*g_apps)[row].pinKey;
+    const std::wstring exe = (*g_apps)[row].executablePath;
+    g_outputMenuOpen = true;
+    g_outputListAnchored = true;
+    KillTimer(window, TIMER_CHECK_FOCUS);
+    SelectRow(row);
+
+    std::vector<OutputDevice> outputs;
+    std::wstring defaultId;
+    HRESULT result = LoadOutputDevices(outputs, defaultId);
+    std::wstring defaultName = L"Follow default";
+    for (const OutputDevice& output : outputs) {
+        if (output.id == defaultId) {
+            defaultName += L" (" + output.name + L")";
+            break;
+        }
+    }
+    outputs.insert(outputs.begin(), OutputDevice{L"", defaultName, L""});
+    std::wstring target = FxTarget(exe);
+    int current = target.empty() || target == FX_FOLLOW_DEFAULT ? 0 : -1;
+    for (size_t i = 1; i < outputs.size(); ++i) {
+        if (!target.empty() && _wcsicmp(outputs[i].id.c_str(), target.c_str()) == 0) current = static_cast<int>(i);
+    }
+    RECT client;
+    GetClientRect(window, &client);
+    RECT anchor = RowRect(row, client.right);
+    SetForegroundWindow(window);
+    InvalidateRect(window, nullptr, FALSE);
+    int selected = RunOutputList(window, outputs, current,
+                                 FAILED(result) ? L"Could not load audio outputs" : L"No available audio outputs", &anchor);
+    g_outputListAnchored = false;
+    if (IsWindow(window) && selected >= 0 && selected != current) {
+        SetFxTarget(exe, selected == 0 ? std::wstring(FX_FOLLOW_DEFAULT) : outputs[selected].id);
+        FxSettingsChanged(exe);
+    }
+    g_outputMenuOpen = false;
+    if (!IsWindow(window)) return;
+    if (selected >= 0 && selected != current) {
+        RefreshSourceList(window);
+        for (size_t i = 0; i < g_apps->size(); ++i) {
+            if ((*g_apps)[i].pinKey == key) SelectRow(static_cast<int>(i));
+        }
+    }
+    InvalidateRect(window, nullptr, FALSE);
+    if (g_settings.closeWhenFocusIsLost && IsWindowVisible(window)) SetTimer(window, TIMER_CHECK_FOCUS, 150, nullptr);
+}
+
 void ShowAppOutputPicker(HWND window, int row) {
     CancelNameTooltip(window);
     if (g_flow == eCapture) return;  // Apps pick their output only in the playback tab.
+    if (row >= 0 && row < static_cast<int>(g_apps->size()) && (*g_apps)[row].virtualInput) {
+        ShowMonitorOutputPicker(window, row);
+        return;
+    }
     if (g_outputMenuOpen || g_dragRow != DRAG_NONE || row < 0 ||
         row >= static_cast<int>(g_apps->size())) {
         return;
@@ -11696,7 +11820,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
     const std::wstring key = (*g_apps)[row].pinKey;
     const std::wstring processName =
         ProcessNameFromPath((*g_apps)[row].executablePath);
-    bool routable = (*g_apps)[row].processId || !(*g_apps)[row].processIds.empty();
+    bool routable = (*g_apps)[row].processId || !(*g_apps)[row].processIds.empty() || (*g_apps)[row].virtualInput;
 
     FinishVolumeEntry(window, false, false);
     CancelNameTooltip(window);
@@ -11704,7 +11828,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
 
     // System sounds and sessions without a process cannot be routed.
     enum MenuItem { OUTPUT, RENAME, COPY, HIDE, HIDE_PERMANENTLY, MAKE_DEFAULT, MOVE_ALL_APPS,
-                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL };
+                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL, STOPLISTEN, LISTEN };
     const std::wstring executablePath = (*g_apps)[row].executablePath;
     const bool systemSoundsRow = (*g_apps)[row].systemSounds;
     const bool boosted = BoostUnlocked(executablePath);
@@ -11725,6 +11849,8 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         } else {
             add(EQUALIZER, L"Equalizer", L"\uE9E9", false);
             add(EFFECTS, L"Effects and listening", L"\uE9D9", false);
+            add(LISTEN, MonitorOn(EndpointGuid(deviceId)) ? L"Stop listening through Headroom" : L"Listen through Headroom",
+                L"", false);
         }
     } else if (g_flow == eRender) {
         add(OUTPUT, L"Output device", L"\uE7F5", !routable);
@@ -11735,12 +11861,12 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
                                    : executablePath.empty() ? -1 : AppStartVolume(ExeFileName(executablePath));
     const int volumeNow = std::clamp(
         static_cast<int>(std::lround(std::min((*g_apps)[row].volume, 1.0f) * 100.0f)), 0, 100);
-    if (device || (g_flow == eRender && !executablePath.empty())) {
+    if (device || (g_flow == eRender && !executablePath.empty() && !(*g_apps)[row].virtualInput)) {
         add(STARTVOL, startVolume >= 0 ? (L"Volume at startup: " + std::to_wstring(startVolume) + L" %").c_str()
                                        : L"Volume at startup",
             L"\uE7E8", false);
     }
-    if (!device && g_flow == eRender) {
+    if (!device && g_flow == eRender && !(*g_apps)[row].virtualInput) {
         add(BOOST, boosted ? L"Limit volume to 100%" : L"Unlock more volume (up to 500%)",
             L"\uE995", executablePath.empty());
     }
@@ -11750,8 +11876,9 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
     }
     if (!device && g_flow == eRender) add(EQUALIZER, L"Equalizer", L"\uE9E9", executablePath.empty());
     if (!device && g_flow == eRender) add(EFFECTS, L"Effects", L"\uE9D9", executablePath.empty());
-    if (!device && g_flow == eRender) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
-    if (!device) add(COPY, L"Copy process name", L"\uE8C8", processName.empty());
+    if (!device && g_flow == eRender && !(*g_apps)[row].virtualInput) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
+    if (!device && !(*g_apps)[row].virtualInput) add(COPY, L"Copy process name", L"\uE8C8", processName.empty());
+    if ((*g_apps)[row].virtualInput) add(STOPLISTEN, L"Stop listening", L"", false);
     add(HIDE, L"Hide temporarily", L"\uE916", false);
     add(HIDE_PERMANENTLY, L"Hide permanently", L"\uED1A", false);
 
@@ -11868,6 +11995,15 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         }
         SelectRow(DRAG_MASTER);
         RefreshSourceList(window);
+    }
+
+    if (command == STOPLISTEN || command == LISTEN) {
+        std::wstring guid = command == LISTEN ? EndpointGuid(deviceId) : InputGuid(executablePath);
+        SetMonitorOn(guid, command == LISTEN && !MonitorOn(guid));
+        g_fxRetryAfter.erase(L"in:" + guid);
+        MonitorsChanged();
+        RefreshSourceList(window);
+        return;
     }
 
     if (command == STARTVOL) {

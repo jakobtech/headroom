@@ -12,7 +12,8 @@ git revert <commit>             # undo one change, keep the history
 ```
 
 ## Unreleased
-- Inputs: a line-in (or any input) can be listened to through Headroom, with its own equalizer, loudness equalization, LoudMax and gain. In the microphone tab, open the device list, right-click the input, choose *Effects and listening*.
+- Inputs: a line-in (or any input) can be listened to through Headroom. In the microphone tab, open the device list, right-click the input and choose *Listen through Headroom*. It then shows up in the playback list like an app, with its own volume, mute, output, equalizer, loudness equalization, LoudMax and gain.
+- Settings: *Equalizer APO* On/Off decides who runs the equalizers of outputs: Equalizer APO, or Headroom's own engine.
 
 ## 2.1.0-alpha4
 - Updates: *Check for updates* in the settings window looks for a newer release on GitHub, downloads it, checks it against the release's checksums and installs it over the running copy (with the setup if installed, by replacing the file if it runs on its own), then restarts.
