@@ -8406,7 +8406,10 @@ void AppendMonitorRows() {
     for (const std::wstring& guid : MonitorGuids()) {
         std::wstring id = CaptureDeviceId(guid);
         IMMDevice* device = nullptr;
-        if (id.empty() || FAILED(enumerator->GetDevice(id.c_str(), &device)) || !device) continue;
+        if (id.empty() || FAILED(enumerator->GetDevice(id.c_str(), &device)) || !device) {
+            Wh_Log(L"Mixer: the input %s that is listened to is not available", guid.c_str());
+            continue;
+        }
         AppSession row;
         row.virtualInput = true;
         row.executablePath = L"in:" + guid;  // The name its settings are kept under.
@@ -8426,6 +8429,7 @@ void AppendMonitorRows() {
         }
         row.muted = MonitorMuted(guid);
         device->Release();
+        Wh_Log(L"Mixer: listened-to input row '%s', volume %.0f %%, %s", row.name.c_str(), row.volume * 100.0f, row.muted ? L"muted" : L"not muted");
         g_apps->push_back(std::move(row));
     }
     enumerator->Release();
