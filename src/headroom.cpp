@@ -8406,10 +8406,10 @@ void AppendMonitorRows() {
     for (const std::wstring& guid : MonitorGuids()) {
         std::wstring id = CaptureDeviceId(guid);
         IMMDevice* device = nullptr;
-        if (id.empty() || FAILED(enumerator->GetDevice(id.c_str(), &device)) || !device) {
-            Wh_Log(L"Mixer: the input %s that is listened to is not available", guid.c_str());
-            continue;
-        }
+        bool connected = !id.empty() && SUCCEEDED(enumerator->GetDevice(id.c_str(), &device)) && device;
+        // An input that is not connected (a console that is off can make the jack read as unplugged) stays in the
+        // list, so it does not seem to vanish.
+        if (!connected) Wh_Log(L"Mixer: the input %s that is listened to is not connected", guid.c_str());
         AppSession row;
         row.virtualInput = true;
         row.executablePath = L"in:" + guid;  // The name its settings are kept under.
@@ -8418,7 +8418,8 @@ void AppendMonitorRows() {
         row.active = true;
         row.pinned = Wh_GetIntValue(row.pinKey.c_str(), 0) != 0;
         const std::wstring& renamed = StoredSourceName(row.pinKey);
-        row.name = renamed.empty() ? ReadEndpointName(device) : renamed;
+        row.name = renamed.empty() ? (connected ? ReadEndpointName(device) : std::wstring(L"Input")) : renamed;
+        if (!connected) row.name += L" (not connected)";
         row.volume = MonitorVolume(guid);
         // "Volume at startup": set once per run, like an app's.
         static std::unordered_set<std::wstring> started;
@@ -8428,7 +8429,7 @@ void AppendMonitorRows() {
             row.volume = startVolume / 100.0f;
         }
         row.muted = MonitorMuted(guid);
-        device->Release();
+        if (device) device->Release();
         Wh_Log(L"Mixer: listened-to input row '%s', volume %.0f %%, %s", row.name.c_str(), row.volume * 100.0f, row.muted ? L"muted" : L"not muted");
         g_apps->push_back(std::move(row));
     }
