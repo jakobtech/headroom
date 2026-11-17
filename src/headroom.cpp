@@ -8961,6 +8961,8 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     int queueMs = 30;  // How much is kept queued in the output.
     int extraMs = 0;   // Added when the output ran dry: a busy computer needs a larger queue.
     ULONGLONG lastPlayed = 0;
+    const ULONGLONG started = GetTickCount64();  // The first seconds of a stream do not count as running dry.
+    ULONGLONG lastGrow = 0;
     ULONGLONG nextDefaultCheck = 0;
     ULONGLONG nextCeilingCheck = 0;
     bool ok = captureClient && captured && (monitor || sink.size()) &&
@@ -9086,7 +9088,9 @@ DWORD WINAPI FxStreamThread(void* parameter) {
             if (state == AUDCLNT_E_DEVICE_INVALIDATED) {
                 render.Close();
             } else if (SUCCEEDED(state)) {
-                if (padding == 0 && !fifo.empty() && lastPlayed && now - lastPlayed < 60 && extraMs < 25) {
+                if (padding == 0 && !fifo.empty() && lastPlayed && now - lastPlayed < 60 && extraMs < 25 &&
+                    now - started > 3000 && now - lastGrow > 2000) {
+                    lastGrow = now;
                     extraMs += 5;
                     Wh_Log(L"Mixer: output of %s ran dry, queue now %d ms", stream->exe.c_str(), queueMs + extraMs);
                 }
