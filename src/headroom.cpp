@@ -3474,6 +3474,26 @@ void RegisterMuteHotkeys(HWND window) {
     }
 }
 
+// The key that opens the mixer, at the monitor where the pointer is: "modifiers|key" under "openHotkey_v1".
+constexpr int HOTKEY_OPEN_ID = 0x40FE;
+constexpr PCWSTR OPEN_HOTKEY_VALUE = L"openHotkey_v1";
+bool g_openAtPointer;  // The mixer was opened with the key, so it sits at that monitor, not at the tray icon.
+RECT g_openAnchor;
+
+void RegisterOpenHotkey(HWND window) {
+    UnregisterHotKey(window, HOTKEY_OPEN_ID);
+    wchar_t buffer[32]{};
+    Wh_GetStringValue(OPEN_HOTKEY_VALUE, buffer, ARRAYSIZE(buffer));
+    buffer[ARRAYSIZE(buffer) - 1] = L'\0';
+    const wchar_t* bar = wcschr(buffer, L'|');
+    if (!bar) return;
+    UINT modifiers = wcstoul(buffer, nullptr, 10), key = wcstoul(bar + 1, nullptr, 10);
+    if (!key || !modifiers) return;  // A key on its own would take over typing.
+    if (!RegisterHotKey(window, HOTKEY_OPEN_ID, modifiers | MOD_NOREPEAT, key)) {
+        Wh_Log(L"Mixer: the key that opens the mixer is taken by another program, error %lu", GetLastError());
+    }
+}
+
 const MuteHotkey* FindMuteHotkey(const std::wstring& path) {
     LoadMuteHotkeys();
     std::wstring lower = LowerPath(path);
@@ -5098,7 +5118,9 @@ bool GetTrayIconRect(RECT* rect) {
 
 void PositionMixer(HWND hWnd) {
     RECT anchor = {};
-    if (!GetTrayIconRect(&anchor)) {
+    if (g_openAtPointer) {
+        anchor = g_openAnchor;
+    } else if (!GetTrayIconRect(&anchor)) {
         POINT cursor = {};
         GetCursorPos(&cursor);
         anchor = {cursor.x, cursor.y, cursor.x + 1, cursor.y + 1};
@@ -5399,6 +5421,7 @@ void RememberTrayPress(HWND hWnd) {
 }
 
 void QueueTrayToggle(HWND hWnd, bool keyboard) {
+    g_openAtPointer = false;  // Opened from the tray icon: next to it.
     // The taskbar can take focus and dismiss the popup before mouse-up.
     // Use its visibility at mouse-down, so a closing click cannot reopen it.
     bool close = !keyboard && g_trayPressKnown
@@ -5420,6 +5443,23 @@ void QueueTrayToggle(HWND hWnd, bool keyboard) {
         return;
     }
     QueueMixerAction(hWnd, close);
+}
+
+// The key that opens the mixer: it opens at the bottom right of the monitor the pointer is on, where that
+// monitor's taskbar has its clock, and closes again on the next press.
+void HandleOpenHotkey(HWND hWnd) {
+    if (MixerOpen(hWnd)) {
+        QueueMixerAction(hWnd, true);
+        return;
+    }
+    if (g_openTime || g_closeTime) return;
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &info)) return;
+    g_openAnchor = {info.rcWork.right - 1, info.rcWork.bottom, info.rcWork.right, info.rcWork.bottom + 1};
+    g_openAtPointer = true;
+    QueueShowMixer(hWnd);
 }
 
 // Frees what only an open mixer needs: its frame buffers and drawn text.
@@ -12335,6 +12375,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam,
             SelectRow(DRAG_MASTER);
             StopDefaultVolumeNotifications();
             LoadSettings();
+            RegisterOpenHotkey(hWnd);
             WriteEqualizerConfig();  // Who runs the outputs' effects may have changed.
             CreateFonts(hWnd);  // The visual style selects the font families.
             if (!g_settings.moveNotifications) {
@@ -12794,6 +12835,10 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam,
             return 0;
 
         case WM_HOTKEY:
+            if (static_cast<int>(wParam) == HOTKEY_OPEN_ID) {
+                HandleOpenHotkey(hWnd);
+                return 0;
+            }
             HandleMuteHotkey(hWnd, static_cast<int>(wParam));
             return 0;
 
@@ -12988,6 +13033,7 @@ DWORD WINAPI ThreadProc(LPVOID) {
 
     g_hWnd.store(hWnd);
     RegisterMuteHotkeys(hWnd);
+    RegisterOpenHotkey(hWnd);
     UpdateFx(hWnd);
     SetTimer(hWnd, TIMER_FX, 1500, nullptr);
     Wh_Log(L"Mixer: window created, HWND=%p", static_cast<void*>(hWnd));

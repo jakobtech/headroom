@@ -195,7 +195,7 @@ struct HiddenApp {
 
 struct SettingsUi {
     HWND window = nullptr;
-    HWND pathEdit = nullptr, addEdit = nullptr;
+    HWND pathEdit = nullptr, addEdit = nullptr, hotkeyEdit = nullptr;
     std::vector<Item> items;
     std::unordered_map<std::wstring, int> ints;
     std::unordered_map<std::wstring, std::wstring> strings;
@@ -209,7 +209,7 @@ struct SettingsUi {
     RECT buttons[10]{};  // 6 reset, 7 export, 8 import, 9 check for updates.
     bool updateBusy = false;
     RECT tabs[2]{};
-    RECT pathCard{}, hiddenCard{}, outputsCard{};
+    RECT pathCard{}, hiddenCard{}, outputsCard{}, hotkeyCard{}, hotkeyField{};
     RECT addField{};
     int capacity = 3;  // How many rows the two lists show.
     int scroll[2] = {0, 0};  // The first row shown: 0 the apps, 1 the devices.
@@ -430,6 +430,9 @@ void BuildItems() {
         }
     }
     int y = top + static_cast<int>(std::max(left.size(), right.size())) * rowStep + 4;
+    g_ui.hotkeyCard = Box(20, y, 840, 64);
+    g_ui.hotkeyField = Box(20 + 840 - 300, y + 15, 284, 34);
+    y += 74;
     g_ui.pathCard = Box(20, y, 840, 96);
     g_ui.buttons[3] = Box(20 + 840 - 104, y + 52, 92, 30);  // Browse.
     y += 106;
@@ -480,7 +483,34 @@ std::wstring Trim(const std::wstring& s) {
     return s.substr(a, s.find_last_not_of(L" \t") - a + 1);
 }
 
+void LoadOpenHotkey() {
+    wchar_t buffer[32]{};
+    Wh_GetStringValue(L"openHotkey_v1", buffer, ARRAYSIZE(buffer));
+    buffer[ARRAYSIZE(buffer) - 1] = L'\0';
+    const wchar_t* bar = wcschr(buffer, L'|');
+    if (!bar || !g_ui.hotkeyEdit) return;
+    UINT mods = wcstoul(buffer, nullptr, 10), key = wcstoul(bar + 1, nullptr, 10);
+    BYTE flags = static_cast<BYTE>(((mods & MOD_SHIFT) ? HOTKEYF_SHIFT : 0) | ((mods & MOD_CONTROL) ? HOTKEYF_CONTROL : 0) |
+                                   ((mods & MOD_ALT) ? HOTKEYF_ALT : 0));
+    SendMessageW(g_ui.hotkeyEdit, HKM_SETHOTKEY, MAKEWORD(static_cast<BYTE>(key), flags), 0);
+}
+
+void SaveOpenHotkey() {
+    if (!g_ui.hotkeyEdit) return;
+    LRESULT value = SendMessageW(g_ui.hotkeyEdit, HKM_GETHOTKEY, 0, 0);
+    BYTE key = LOBYTE(value), flags = HIBYTE(value);
+    UINT mods = ((flags & HOTKEYF_SHIFT) ? MOD_SHIFT : 0) | ((flags & HOTKEYF_CONTROL) ? MOD_CONTROL : 0) |
+                ((flags & HOTKEYF_ALT) ? MOD_ALT : 0);
+    if (!key || !mods) {
+        Wh_DeleteValue(L"openHotkey_v1");
+    } else {
+        std::wstring stored = std::to_wstring(mods) + L"|" + std::to_wstring(key);
+        Wh_SetStringValue(L"openHotkey_v1", stored.c_str());
+    }
+}
+
 void LoadLists() {
+    LoadOpenHotkey();
     SetWindowTextW(g_ui.pathEdit, headroom::GetSettingString(L"loudMaxPath").c_str());
 }
 
@@ -527,6 +557,7 @@ void SaveAll() {
         }
     }
     headroom::SetSettingString(L"loudMaxPath", Trim(GetText(g_ui.pathEdit)));
+    SaveOpenHotkey();
     headroom::FlushStore();
 }
 
@@ -543,6 +574,8 @@ PCWSTR CardInfo(int card) {
         case 0:
             return L"The full path to LoudMax64.dll, if the mixer does not find it on its own. Leave it empty to search Equalizer APO's VSTPlugins folder and the usual VST folders. Quotes are not needed.";
         case 1:
+            return L"A key combination that opens the mixer from anywhere, also while you play, at the bottom right of the monitor the mouse is on. Press it again to close the mixer. The tray icon only exists on the main monitor's taskbar, so this is the way to open the mixer on another monitor. Use a modifier (Ctrl, Alt or Shift) with a key, for example Ctrl+Alt+V.";
+        case 99:
             return L"Gives an app its own name or a starting volume. One app per line: the program name (for example Spotify.exe), then a bar, the name to show, a bar and a volume from 0 to 100. Both parts after the app are optional. The first matching line wins.";
         case 2:
             return L"Apps that are never listed in the mixer. Type a program name, for example Spotify.exe, and press Add. Show brings an app back. Apps you hide with 'Hide permanently' in the mixer appear here too. Hiding does not mute the app.";
@@ -698,6 +731,7 @@ void PaintSettings(HWND window) {
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     };
+    card(1, g_ui.hotkeyCard, L"Open the mixer with a key", L"At the monitor where the mouse is. Click the box and press the keys. Backspace clears it.");
     card(0, g_ui.pathCard, L"LoudMax path", L"Full path to LoudMax64.dll. Empty: the mixer looks in Equalizer APO's folders.");
     card(2, g_ui.hiddenCard, L"Hidden apps", L"Never listed in the mixer");
     card(3, g_ui.outputsCard, L"Hidden devices", L"Left out of the device lists");
@@ -1182,7 +1216,7 @@ void ShowPage(int page) {
     g_ui.page = page;
     HideInfoTip();
     g_ui.hotInfo = -1;
-    for (HWND edit : {g_ui.pathEdit, g_ui.addEdit}) {
+    for (HWND edit : {g_ui.pathEdit, g_ui.addEdit, g_ui.hotkeyEdit}) {
         if (edit) ShowWindow(edit, page == 0 ? SW_SHOW : SW_HIDE);
     }
     InvalidateRect(g_ui.window, nullptr, FALSE);
@@ -1523,6 +1557,18 @@ void ShowSettingsWindow() {
     pathField.top += Scale(52);
     g_ui.pathEdit = MakeEdit(g_ui.window, pathField, nullptr);
     g_ui.addEdit = MakeEdit(g_ui.window, g_ui.addField, L"Hide another app, for example Spotify.exe");
+    INITCOMMONCONTROLSEX hotkeyClass = {sizeof(hotkeyClass), ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&hotkeyClass);
+    const RECT& hk = g_ui.hotkeyField;
+    g_ui.hotkeyEdit = CreateWindowExW(0, HOTKEY_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, hk.left, hk.top,
+                                      hk.right - hk.left, hk.bottom - hk.top, g_ui.window, nullptr,
+                                      GetModuleHandleW(nullptr), nullptr);
+    if (g_ui.hotkeyEdit) {
+        SendMessageW(g_ui.hotkeyEdit, WM_SETFONT, reinterpret_cast<WPARAM>(g_bodyFont), TRUE);
+        SetWindowTheme(g_ui.hotkeyEdit, g_lightTheme ? L"Explorer" : L"DarkMode_Explorer", nullptr);
+        // Without a modifier a key would take over typing: such a combination becomes Ctrl+Alt+key.
+        SendMessageW(g_ui.hotkeyEdit, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+    }
     LoadLists();
     SetThreadDpiAwarenessContext(previousAwareness);
     ShowWindow(g_ui.window, SW_SHOW);

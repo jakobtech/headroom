@@ -13,6 +13,7 @@ git revert <commit>             # undo one change, keep the history
 
 ## Unreleased
 - Inputs: a line-in (or any input) can be listened to through Headroom. In the microphone tab, open the device list, right-click the input and choose *Listen through Headroom*. It then shows up in the playback list like an app, with its own volume, mute, output, equalizer, loudness equalization, LoudMax and gain.
+- Settings: *Open the mixer with a key*: a key combination that opens (and closes) the mixer from anywhere, at the bottom right of the monitor the mouse is on. Windows shows the tray icon only on the main monitor's taskbar.
 - Settings: *Extended equalizer range* and *Equalizer range* let the equalizer bands go beyond 12 dB, up to 60 dB.
 - A listened-to input has the options of an app: volume up to 500 % (unlock more volume), gain, mute hotkey, volume at startup, output, equalizer and effects.
 - Settings: *Equalizer APO* On/Off decides who runs the equalizers of outputs: Equalizer APO, or Headroom's own engine.
