@@ -195,7 +195,9 @@ struct HiddenApp {
 
 struct SettingsUi {
     HWND window = nullptr;
-    HWND pathEdit = nullptr, addEdit = nullptr, hotkeyEdit = nullptr;
+    HWND pathEdit = nullptr, addEdit = nullptr;
+    UINT hkMods = 0, hkKey = 0;  // The key that opens the mixer: modifiers (MOD_*) and virtual key.
+    bool hkRecording = false;    // Waiting for the keys.
     std::vector<Item> items;
     std::unordered_map<std::wstring, int> ints;
     std::unordered_map<std::wstring, std::wstring> strings;
@@ -488,25 +490,36 @@ void LoadOpenHotkey() {
     Wh_GetStringValue(L"openHotkey_v1", buffer, ARRAYSIZE(buffer));
     buffer[ARRAYSIZE(buffer) - 1] = L'\0';
     const wchar_t* bar = wcschr(buffer, L'|');
-    if (!bar || !g_ui.hotkeyEdit) return;
-    UINT mods = wcstoul(buffer, nullptr, 10), key = wcstoul(bar + 1, nullptr, 10);
-    BYTE flags = static_cast<BYTE>(((mods & MOD_SHIFT) ? HOTKEYF_SHIFT : 0) | ((mods & MOD_CONTROL) ? HOTKEYF_CONTROL : 0) |
-                                   ((mods & MOD_ALT) ? HOTKEYF_ALT : 0));
-    SendMessageW(g_ui.hotkeyEdit, HKM_SETHOTKEY, MAKEWORD(static_cast<BYTE>(key), flags), 0);
+    g_ui.hkMods = g_ui.hkKey = 0;
+    if (!bar) return;
+    g_ui.hkMods = wcstoul(buffer, nullptr, 10);
+    g_ui.hkKey = wcstoul(bar + 1, nullptr, 10);
+    if (!g_ui.hkMods || !g_ui.hkKey) g_ui.hkMods = g_ui.hkKey = 0;
 }
 
 void SaveOpenHotkey() {
-    if (!g_ui.hotkeyEdit) return;
-    LRESULT value = SendMessageW(g_ui.hotkeyEdit, HKM_GETHOTKEY, 0, 0);
-    BYTE key = LOBYTE(value), flags = HIBYTE(value);
-    UINT mods = ((flags & HOTKEYF_SHIFT) ? MOD_SHIFT : 0) | ((flags & HOTKEYF_CONTROL) ? MOD_CONTROL : 0) |
-                ((flags & HOTKEYF_ALT) ? MOD_ALT : 0);
-    if (!key || !mods) {
+    if (!g_ui.hkKey || !g_ui.hkMods) {
         Wh_DeleteValue(L"openHotkey_v1");
     } else {
-        std::wstring stored = std::to_wstring(mods) + L"|" + std::to_wstring(key);
+        std::wstring stored = std::to_wstring(g_ui.hkMods) + L"|" + std::to_wstring(g_ui.hkKey);
         Wh_SetStringValue(L"openHotkey_v1", stored.c_str());
     }
+}
+
+// "Ctrl + Alt + V"
+std::wstring HotkeyLabel(UINT mods, UINT key) {
+    std::wstring text;
+    if (mods & MOD_CONTROL) text += L"Ctrl + ";
+    if (mods & MOD_ALT) text += L"Alt + ";
+    if (mods & MOD_SHIFT) text += L"Shift + ";
+    wchar_t name[64]{};
+    UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC);
+    bool extended = key == VK_INSERT || key == VK_DELETE || key == VK_HOME || key == VK_END || key == VK_PRIOR ||
+                    key == VK_NEXT || key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN;
+    if (!GetKeyNameTextW(static_cast<LONG>((scan << 16) | (extended ? 1u << 24 : 0u)), name, ARRAYSIZE(name))) {
+        swprintf_s(name, L"Key %u", key);
+    }
+    return text + name;
 }
 
 void LoadLists() {
@@ -731,7 +744,7 @@ void PaintSettings(HWND window) {
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     };
-    card(1, g_ui.hotkeyCard, L"Open the mixer with a key", L"At the monitor where the mouse is. Click the box and press the keys. Backspace clears it.");
+    card(1, g_ui.hotkeyCard, L"Open the mixer with a key", L"At the monitor where the mouse is. Click the field, then press the keys. Backspace clears it.");
     card(0, g_ui.pathCard, L"LoudMax path", L"Full path to LoudMax64.dll. Empty: the mixer looks in Equalizer APO's folders.");
     card(2, g_ui.hiddenCard, L"Hidden apps", L"Never listed in the mixer");
     card(3, g_ui.outputsCard, L"Hidden devices", L"Left out of the device lists");
@@ -744,6 +757,20 @@ void PaintSettings(HWND window) {
         field.top += Scale(52);
         DrawRoundedRect(dc, field, Radius(10), control);
         DrawRoundedRect(dc, g_ui.addField, Radius(10), control);
+        // The key that opens the mixer: a field like the others, with an accent edge while it waits for the keys.
+        const RECT& hk = g_ui.hotkeyField;
+        if (g_ui.hkRecording) {
+            DrawRoundedRect(dc, hk, Radius(10), g_theme.accent);
+            RECT inner = hk;
+            InflateRect(&inner, -Scale(2), -Scale(2));
+            DrawRoundedRect(dc, inner, Radius(8), control);
+        } else {
+            DrawRoundedRect(dc, hk, Radius(10), control);
+        }
+        bool set = g_ui.hkKey && g_ui.hkMods;
+        std::wstring label = g_ui.hkRecording ? L"Press the keys..." : set ? HotkeyLabel(g_ui.hkMods, g_ui.hkKey) : L"None";
+        DrawLabel(dc, label, hk, g_bodyFont, set || g_ui.hkRecording ? g_theme.text : g_theme.secondaryText,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     // The two lists: one pill per entry, each with a button to bring it back.
@@ -1216,7 +1243,7 @@ void ShowPage(int page) {
     g_ui.page = page;
     HideInfoTip();
     g_ui.hotInfo = -1;
-    for (HWND edit : {g_ui.pathEdit, g_ui.addEdit, g_ui.hotkeyEdit}) {
+    for (HWND edit : {g_ui.pathEdit, g_ui.addEdit}) {
         if (edit) ShowWindow(edit, page == 0 ? SW_SHOW : SW_HIDE);
     }
     InvalidateRect(g_ui.window, nullptr, FALSE);
@@ -1344,6 +1371,16 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
         case WM_LBUTTONDOWN: {
             HideInfoTip();
             g_ui.hotInfo = -1;
+            if (g_ui.page == 0 && PtInRect(&g_ui.hotkeyField, point)) {
+                g_ui.hkRecording = !g_ui.hkRecording;  // Click, then press the keys.
+                SetFocus(hwnd);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (g_ui.hkRecording) {
+                g_ui.hkRecording = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             Hit hit = HitTest(point);
             bool onScroll = false;
             if (g_ui.page == 0) {
@@ -1458,6 +1495,38 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
         case WM_APP_UPDATE_READY:
             OnUpdateReady(hwnd, std::unique_ptr<UpdateResult>(reinterpret_cast<UpdateResult*>(lParam)));
             return 0;
+        case WM_GETDLGCODE:
+            if (g_ui.hkRecording) return DLGC_WANTALLKEYS;  // Esc, Enter and Tab are keys of the combination now.
+            break;
+        case WM_KILLFOCUS:
+            if (g_ui.hkRecording) {
+                g_ui.hkRecording = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (g_ui.hkRecording) {
+                UINT key = static_cast<UINT>(wParam);
+                if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU || key == VK_LWIN || key == VK_RWIN) return 0;
+                if (key == VK_ESCAPE) {
+                    g_ui.hkRecording = false;  // Leaves it as it was.
+                } else if (key == VK_BACK || key == VK_DELETE) {
+                    g_ui.hkMods = g_ui.hkKey = 0;
+                    g_ui.hkRecording = false;
+                } else {
+                    UINT mods = ((GetKeyState(VK_CONTROL) & 0x8000) ? MOD_CONTROL : 0) |
+                                ((GetKeyState(VK_MENU) & 0x8000) ? MOD_ALT : 0) |
+                                ((GetKeyState(VK_SHIFT) & 0x8000) ? MOD_SHIFT : 0);
+                    if (!mods) mods = MOD_CONTROL | MOD_ALT;  // A key on its own would take over typing.
+                    g_ui.hkMods = mods;
+                    g_ui.hkKey = key;
+                    g_ui.hkRecording = false;
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            break;
         case WM_COMMAND:
             if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hwnd);  // Esc.
             else if (LOWORD(wParam) == IDOK && GetFocus() == g_ui.addEdit) AddHiddenApp();  // Enter.
@@ -1557,18 +1626,6 @@ void ShowSettingsWindow() {
     pathField.top += Scale(52);
     g_ui.pathEdit = MakeEdit(g_ui.window, pathField, nullptr);
     g_ui.addEdit = MakeEdit(g_ui.window, g_ui.addField, L"Hide another app, for example Spotify.exe");
-    INITCOMMONCONTROLSEX hotkeyClass = {sizeof(hotkeyClass), ICC_HOTKEY_CLASS};
-    InitCommonControlsEx(&hotkeyClass);
-    const RECT& hk = g_ui.hotkeyField;
-    g_ui.hotkeyEdit = CreateWindowExW(0, HOTKEY_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP, hk.left, hk.top,
-                                      hk.right - hk.left, hk.bottom - hk.top, g_ui.window, nullptr,
-                                      GetModuleHandleW(nullptr), nullptr);
-    if (g_ui.hotkeyEdit) {
-        SendMessageW(g_ui.hotkeyEdit, WM_SETFONT, reinterpret_cast<WPARAM>(g_bodyFont), TRUE);
-        SetWindowTheme(g_ui.hotkeyEdit, g_lightTheme ? L"Explorer" : L"DarkMode_Explorer", nullptr);
-        // Without a modifier a key would take over typing: such a combination becomes Ctrl+Alt+key.
-        SendMessageW(g_ui.hotkeyEdit, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
-    }
     LoadLists();
     SetThreadDpiAwarenessContext(previousAwareness);
     ShowWindow(g_ui.window, SW_SHOW);
