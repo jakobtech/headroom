@@ -208,7 +208,7 @@ struct SettingsUi {
     int hotTab = -1;
     int drag = -1;
     bool tracking = false;
-    RECT buttons[10]{};  // 6 reset, 7 export, 8 import, 9 check for updates.
+    RECT buttons[10]{};  // 0 apply, 6 reset, 7 export, 8 import, 9 check for updates.
     bool updateBusy = false;
     RECT tabs[2]{};
     RECT pathCard{}, hiddenCard{}, outputsCard{}, hotkeyCard{}, hotkeyField{};
@@ -451,7 +451,8 @@ void BuildItems() {
     g_ui.buttons[6] = Box(20, y, 150, 34);          // Reset to default.
     g_ui.buttons[7] = Box(180, y, 100, 34);         // Export.
     g_ui.buttons[8] = Box(290, y, 100, 34);         // Import.
-    g_ui.buttons[9] = Box(400, y, 170, 34);         // Check for updates.
+    g_ui.buttons[9] = Box(400, y, 150, 34);         // Check for updates.
+    g_ui.buttons[0] = Box(860 - 306, y, 96, 34);    // Apply.
     g_ui.width = Scale(880);
     g_ui.height = Scale(y + 34 + 20);
     g_ui.tabs[0] = Box(660 - 20, 16, 100, 30);
@@ -844,6 +845,7 @@ void PaintSettings(HWND window) {
         }
     };
     button(1, L"Save", true);
+    button(0, L"Apply", false);
     button(2, L"Cancel", false);
     button(3, L"Browse\u2026", false);
     button(6, L"Reset to default", false);
@@ -1453,6 +1455,9 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
                 ImportSettings(hwnd);
             } else if (hit.button == 9) {
                 if (!g_ui.updateBusy) StartUpdateCheck(hwnd);
+            } else if (hit.button == 0) {
+                SaveAll();  // Everything takes effect, and the window stays.
+                WhTool_ModSettingsChanged();
             } else if (hit.button == 3) {
                 WCHAR file[MAX_PATH * 2] = {};
                 OPENFILENAMEW ofn = {sizeof(ofn)};
