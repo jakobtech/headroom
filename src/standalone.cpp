@@ -446,13 +446,13 @@ void BuildItems() {
     g_ui.outputsCard = Box(450, y, 410, cardHeight);
     LayoutHiddenLists();
     y += cardHeight + 14;
-    g_ui.buttons[1] = Box(860 - 200, y, 96, 34);    // Save.
+    g_ui.buttons[1] = Box(860 - 202, y, 96, 34);    // Save.
     g_ui.buttons[2] = Box(860 - 96, y, 96, 34);     // Cancel.
-    g_ui.buttons[6] = Box(20, y, 150, 34);          // Reset to default.
-    g_ui.buttons[7] = Box(180, y, 100, 34);         // Export.
-    g_ui.buttons[8] = Box(290, y, 100, 34);         // Import.
-    g_ui.buttons[9] = Box(400, y, 150, 34);         // Check for updates.
-    g_ui.buttons[0] = Box(860 - 306, y, 96, 34);    // Apply.
+    g_ui.buttons[6] = Box(20, y, 140, 34);          // Reset to default.
+    g_ui.buttons[7] = Box(170, y, 90, 34);          // Export.
+    g_ui.buttons[8] = Box(270, y, 90, 34);          // Import.
+    g_ui.buttons[9] = Box(370, y, 150, 34);         // Check for updates.
+    g_ui.buttons[0] = Box(860 - 308, y, 96, 34);    // Apply.
     g_ui.width = Scale(880);
     g_ui.height = Scale(y + 34 + 20);
     g_ui.tabs[0] = Box(660 - 20, 16, 100, 30);
@@ -849,8 +849,8 @@ void PaintSettings(HWND window) {
     button(2, L"Cancel", false);
     button(3, L"Browse\u2026", false);
     button(6, L"Reset to default", false);
-    button(7, L"Export\u2026", false);
-    button(8, L"Import\u2026", false);
+    button(7, L"Export", false);
+    button(8, L"Import", false);
     button(9, g_ui.updateBusy ? L"Working..." : L"Check for updates", false);
 
     g_paintMatte = matte;
