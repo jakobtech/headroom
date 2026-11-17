@@ -39,6 +39,12 @@
 - volumeStep: 5
   $name: Mouse-wheel volume step
   $description: Percentage points per mouse-wheel step over an app or master-volume row, or over the tray icon. Valid range is 1 to 20; default is 5.
+- eqRangeCustom: false
+  $name: Extended equalizer range
+  $description: Lets the equalizer go beyond 12 dB. The most is set below.
+- eqRangeDb: 24
+  $name: Equalizer range
+  $description: The most the equalizer bands can raise or lower, in dB, while the extended range is on. 12 to 60.
 - keyboardControls: false
   $name: Keyboard controls
   $description: Up/Down selects a row, Left/Right changes volume by the mouse-wheel step, and M toggles mute. Works while the mixer is focused. Off by default.
@@ -255,6 +261,8 @@ struct Settings {
     std::wstring backgroundEffect = L"blur";
     int maxVisibleApps = 7;
     int volumeStep = 5;
+    bool eqRangeCustom = false;  // The equalizer may go beyond 12 dB ...
+    int eqRangeDb = 24;          // ... up to this many.
     bool keyboardControls = false;
     bool exactVolumeEntry = false;
     std::vector<CustomApp> customApps;
@@ -808,6 +816,8 @@ void LoadSettings() {
     g_settings.exactVolumeEntry = Wh_GetIntSetting(L"exactVolumeEntry") != 0;
     g_settings.volumeStep =
         ClampInt(Wh_GetIntSetting(L"volumeStep"), 1, 20);
+    g_settings.eqRangeCustom = Wh_GetIntSetting(L"eqRangeCustom") != 0;
+    g_settings.eqRangeDb = ClampInt(Wh_GetIntSetting(L"eqRangeDb"), 12, 60);
 
     g_settings.customApps.clear();
     // The settings API has no array length query. Scan a bounded range so a
@@ -1595,6 +1605,7 @@ std::wstring ExeFileName(const std::wstring& path) {
 void FxSettingsChanged(const std::wstring& exe);
 void SetMonitorVolume(const std::wstring& key, float volume);
 void SetMonitorMuted(const std::wstring& key, bool muted);
+bool MonitorMuted(const std::wstring& guid);
 void AppendMonitorRows();
 
 // Kept in the mod's storage as one "name|percent" line per app.
@@ -2773,7 +2784,7 @@ float GetAppPeak(const AppSession& app) {
 float RowMaxLevel(int row) {
     if (row < 0 || row >= static_cast<int>(g_apps->size())) return 1.0f;
     const AppSession& app = (*g_apps)[row];
-    return !app.IsDevice() && BoostUnlocked(app.executablePath) ? BOOST_MAX : 1.0f;
+    return (!app.IsDevice() || app.virtualInput) && BoostUnlocked(app.executablePath) ? BOOST_MAX : 1.0f;
 }
 
 // Setting an output's volume can take a while: USB and wireless headsets hand it on to their
@@ -2866,7 +2877,11 @@ void SetRowVolume(int row, float value) {
     if (app.virtualInput) {
         // A listened-to input has no Windows session: its volume is the mixer's own.
         SetMonitorVolume(app.executablePath, value);
-        app.volume = value;
+        app.volume = level;
+        // Like an app: above 100 % the engine makes up the rest (the boost, up to 500 %).
+        if (level > 1.0f || BoostUnlocked(app.executablePath)) {
+            SetBoostPercent(app.executablePath, static_cast<int>(std::lround(std::max(level, 1.0f) * 100.0f)));
+        }
         if (value > 0.0f) app.muted = false;
         return;
     }
@@ -3515,6 +3530,11 @@ std::wstring HotkeyText(UINT modifiers, UINT key) {
 
 // Mutes every session of the executable, or unmutes them when all are muted.
 void ToggleMuteForPath(const std::wstring& path) {
+    if (path.rfind(L"in:", 0) == 0) {
+        // A listened-to input: its mute is the mixer's own.
+        SetMonitorMuted(path, !MonitorMuted(path.substr(3)));
+        return;
+    }
     std::vector<ISimpleAudioVolume*> volumes;
     IMMDeviceEnumerator* enumerator = nullptr;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
@@ -7178,7 +7198,12 @@ const EqLayout EQ_LAYOUTS[] = {
 };
 constexpr int EQ_TONE_BANDS = 3;
 constexpr int EQ_DEFAULT_BANDS = EQ_TONE_BANDS;
-constexpr int EQ_LIMIT = 120;  // Tenths of a decibel: +-12 dB.
+constexpr int EQ_HARD_MAX = 600;  // Tenths of a decibel: the most a saved band can hold, +-60 dB.
+
+// How far the faders go: +-12 dB, or what the settings allow.
+int EqLimit() {
+    return g_settings.eqRangeCustom ? ClampInt(g_settings.eqRangeDb * 10, 120, EQ_HARD_MAX) : 120;
+}
 
 const EqLayout& EqLayoutFor(int count) {
     for (const auto& layout : EQ_LAYOUTS) {
@@ -7220,7 +7245,7 @@ EqualizerState ResampleEqualizer(const EqualizerState& from, int count) {
             }
         }
         int rounded = static_cast<int>(std::lround(gain / 5.0)) * 5;  // 0.5 dB steps.
-        to.gains[i] = ClampInt(rounded, -EQ_LIMIT, EQ_LIMIT);
+        to.gains[i] = ClampInt(rounded, -EQ_HARD_MAX, EQ_HARD_MAX);
     }
     return to;
 }
@@ -7249,7 +7274,7 @@ EqualizerState LoadEqualizerValue(const std::wstring& valueName) {
     }
     for (int band = 0; band < state.bands && list && *list; ++band) {
         state.gains[band] =
-            ClampInt(static_cast<int>(wcstol(list, nullptr, 10)), -EQ_LIMIT, EQ_LIMIT);
+            ClampInt(static_cast<int>(wcstol(list, nullptr, 10)), -EQ_HARD_MAX, EQ_HARD_MAX);
         list = wcschr(list, L',');
         if (list) ++list;
     }
@@ -7336,7 +7361,7 @@ std::vector<EqPreset> LoadEqPresets() {
         const wchar_t* list = line.c_str() + second + 1;
         for (int band = 0; band < preset.curve.bands && list && *list; ++band) {
             preset.curve.gains[band] =
-                ClampInt(static_cast<int>(wcstol(list, nullptr, 10)), -EQ_LIMIT, EQ_LIMIT);
+                ClampInt(static_cast<int>(wcstol(list, nullptr, 10)), -EQ_HARD_MAX, EQ_HARD_MAX);
             list = wcschr(list, L',');
             if (list) ++list;
         }
@@ -8352,6 +8377,13 @@ void AppendMonitorRows() {
         const std::wstring& renamed = StoredSourceName(row.pinKey);
         row.name = renamed.empty() ? ReadEndpointName(device) : renamed;
         row.volume = MonitorVolume(guid);
+        // "Volume at startup": set once per run, like an app's.
+        static std::unordered_set<std::wstring> started;
+        int startVolume = AppStartVolume(row.executablePath);
+        if (startVolume >= 0 && started.insert(guid).second) {
+            SetMonitorVolume(row.executablePath, startVolume / 100.0f);
+            row.volume = startVolume / 100.0f;
+        }
         row.muted = MonitorMuted(guid);
         device->Release();
         g_apps->push_back(std::move(row));
@@ -8396,7 +8428,7 @@ FxSettings BuildFxSettings(const std::wstring& exe) {
     if (IsInputKey(exe)) {
         DeviceGain boost = LoadDeviceGain(InputGuid(exe));
         float volume = MonitorMuted(InputGuid(exe)) ? 0.0f : MonitorVolume(InputGuid(exe));
-        settings.gain = (DeviceGainActive(boost) ? static_cast<float>(std::pow(10.0, boost.tenths / 200.0)) : 1.0f) * volume;
+        settings.gain *= (DeviceGainActive(boost) ? static_cast<float>(std::pow(10.0, boost.tenths / 200.0)) : 1.0f) * volume;
     }
     return settings;
 }
@@ -10192,7 +10224,9 @@ RECT EqBandRect(int band) {
 }
 
 int EqYForGain(int gain, int top, int bottom) {
-    return bottom - (gain + EQ_LIMIT) * (bottom - top) / (2 * EQ_LIMIT);
+    int limit = EqLimit();
+    gain = ClampInt(gain, -limit, limit);  // A band saved with a larger range sits at the end of the fader.
+    return bottom - (gain + limit) * (bottom - top) / (2 * limit);
 }
 
 float EqBandX(int band) {
@@ -10609,10 +10643,12 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         int left, right, top, bottom;
         EqColumns(&left, &right, &top, &bottom);
         int zero = EqYForGain(0, top, bottom);
-        for (int gain : {EQ_LIMIT, 0, -EQ_LIMIT}) {
+        for (int gain : {EqLimit(), 0, -EqLimit()}) {
             int y = EqYForGain(gain, top, bottom);
             RECT scale{surface.left + Scale(4), y - Scale(9), left - Scale(6), y + Scale(9)};
-            DrawLabel(dc, gain > 0 ? L"+12" : gain < 0 ? L"−12" : L"0", scale, g_smallFont,
+            wchar_t scaleText[16];
+            swprintf_s(scaleText, gain > 0 ? L"+%d" : gain < 0 ? L"−%d" : L"0", std::abs(gain) / 10);
+            DrawLabel(dc, scaleText, scale, g_smallFont,
                       g_theme.secondaryText, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         }
         EqCapsule(dc, g, static_cast<float>(left), zero - 0.5f * g_dpi / 96.0f,
@@ -10869,7 +10905,7 @@ void ApplyEqualizer(bool now) {
 }
 
 void SetEqualizerGain(int band, int gain, bool show = true) {
-    gain = ClampInt((gain + (gain >= 0 ? 2 : -2)) / 5 * 5, -EQ_LIMIT, EQ_LIMIT);  // 0.5 dB steps.
+    gain = ClampInt((gain + (gain >= 0 ? 2 : -2)) / 5 * 5, -EqLimit(), EqLimit());  // 0.5 dB steps.
     if (band < 0 || band >= g_eq.state.bands) return;
     if (g_eq.state.gains[band] == gain && g_eq.state.on) return;
     g_eq.state.gains[band] = gain;
@@ -10882,7 +10918,8 @@ void SetEqualizerGain(int band, int gain, bool show = true) {
 
 int EqGainForY(int y, int top, int bottom) {
     y = ClampInt(y, top, bottom);
-    return EQ_LIMIT - (y - top) * 2 * EQ_LIMIT / std::max(1, bottom - top);
+    int limit = EqLimit();
+    return limit - (y - top) * 2 * limit / std::max(1, bottom - top);
 }
 
 void SetEqualizerFromPoint(int band, POINT point) {
@@ -11861,12 +11898,12 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
                                    : executablePath.empty() ? -1 : AppStartVolume(ExeFileName(executablePath));
     const int volumeNow = std::clamp(
         static_cast<int>(std::lround(std::min((*g_apps)[row].volume, 1.0f) * 100.0f)), 0, 100);
-    if (device || (g_flow == eRender && !executablePath.empty() && !(*g_apps)[row].virtualInput)) {
+    if (device || (g_flow == eRender && !executablePath.empty())) {
         add(STARTVOL, startVolume >= 0 ? (L"Volume at startup: " + std::to_wstring(startVolume) + L" %").c_str()
                                        : L"Volume at startup",
             L"\uE7E8", false);
     }
-    if (!device && g_flow == eRender && !(*g_apps)[row].virtualInput) {
+    if (!device && g_flow == eRender) {
         add(BOOST, boosted ? L"Limit volume to 100%" : L"Unlock more volume (up to 500%)",
             L"\uE995", executablePath.empty());
     }
@@ -11876,7 +11913,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
     }
     if (!device && g_flow == eRender) add(EQUALIZER, L"Equalizer", L"\uE9E9", executablePath.empty());
     if (!device && g_flow == eRender) add(EFFECTS, L"Effects", L"\uE9D9", executablePath.empty());
-    if (!device && g_flow == eRender && !(*g_apps)[row].virtualInput) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
+    if (!device && g_flow == eRender) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
     if (!device && !(*g_apps)[row].virtualInput) add(COPY, L"Copy process name", L"\uE8C8", processName.empty());
     if ((*g_apps)[row].virtualInput) add(STOPLISTEN, L"Stop listening", L"", false);
     add(HIDE, L"Hide temporarily", L"\uE916", false);
@@ -11948,7 +11985,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
             RemoveBoost(executablePath);
         } else {
             SetBoostPercent(executablePath, 100);
-            if (!Wh_GetIntValue(L"boostInfoShown", 0)) {
+            if (!Wh_GetIntValue(L"boostInfoShown", 0) && executablePath.rfind(L"in:", 0) != 0) {
                 Wh_SetIntValue(L"boostInfoShown", 1);
                 MessageBoxW(window,
                     L"The slider of this app now goes up to 500%.\n\n"

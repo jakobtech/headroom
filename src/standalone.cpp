@@ -171,6 +171,8 @@ PCWSTR SettingInfo(const std::wstring& name) {
         {L"moveNotifications", L"While the mixer is open, Windows notifications that would cover it are moved aside, and come back when it closes."},
         {L"showIdleAppsOnAllOutputs", L"Lists apps that are silent even when their audio goes to an output other than the default one, for example Steam after you switched from headset to speakers. Off: such apps are listed once they play something."},
         {L"showAllSessions", L"Shows every audio session separately per output, including unused ones, instead of one row per app. Most people leave this off."},
+        {L"eqRangeCustom", L"Lets the equalizer bands of apps, outputs and inputs go beyond 12 dB. The most is set by the slider below. Bands you set higher stay as they are if you turn this off, but the faders then show them at the 12 dB end."},
+        {L"eqRangeDb", L"The most an equalizer band can raise or lower, 12 to 60 dB, while the extended range is on. Large boosts add a lot of level and can distort: the limiter (the mixer's own, or LoudMax) catches the peaks. Keep the volume low when you try a high value."},
         {L"deviceEffects", L"Equalizer APO is a free equalizer for the whole of Windows. On: the equalizer, gain and LoudMax of an output run in Equalizer APO when it is installed and set up for that output: no delay, and all sound, system sounds included. Off: Headroom's own engine does them, only for apps that run through Headroom, with about 40 ms delay. Equalizers of apps and inputs always use Headroom's engine."},
         {L"volumeStep", L"How many percent one step of the mouse wheel changes, over an app row, the master volume or the tray icon. 1 to 20; 5 is usual."},
     };
@@ -383,6 +385,8 @@ void BuildItems() {
         toggle(L"Compact mode", L"compactMode"),
         toggle(L"Animations", L"animations"),
         segments(L"Visible rows", L"visibleRows", kRowsOptions, 6),
+        toggle(L"Extended equalizer range", L"eqRangeCustom"),
+        slider(L"Equalizer range", L"eqRangeDb", 12, 60, L" dB"),
     };
     std::vector<Item> right = {
         toggle(L"Close when focus is lost", L"closeWhenFocusIsLost"),

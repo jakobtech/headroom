@@ -356,6 +356,7 @@ inline int DefaultInt(const std::wstring& name) {
         {L"animations", 1},         {L"closeWhenFocusIsLost", 1},
         {L"switchCommunicationsDevice", 1}, {L"moveNotifications", 1},
         {L"showIdleAppsOnAllOutputs", 1},   {L"showAllSessions", 0},
+        {L"eqRangeCustom", 0},      {L"eqRangeDb", 24},
     };
     auto it = defaults.find(name);
     if (it != defaults.end()) return it->second;
