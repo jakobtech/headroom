@@ -8208,6 +8208,88 @@ bool ChannelMixOnFor(const std::wstring& exe) {
     return LoadChannelMix(exe).on;
 }
 
+// --- inputs: a line-in (or any input) can be listened to through the mixer, with an equalizer and effects of its own.
+// The input is treated like an app called "in:<GUID>": its equalizer, loudness and LoudMax are kept under that name.
+bool IsInputKey(const std::wstring& key) {
+    return key.rfind(L"in:", 0) == 0;
+}
+std::wstring InputKey(const std::wstring& deviceId) {
+    return L"in:" + EndpointGuid(deviceId);
+}
+std::wstring InputGuid(const std::wstring& key) {
+    return key.substr(3);
+}
+
+// The inputs that are listened to, one GUID per line.
+constexpr PCWSTR MONITOR_INDEX_VALUE = L"monitorIndex_v1";
+
+std::vector<std::wstring> MonitorGuids() {
+    std::vector<wchar_t> buffer(4096);
+    Wh_GetStringValue(MONITOR_INDEX_VALUE, buffer.data(), buffer.size());
+    buffer.back() = L'\0';
+    std::vector<std::wstring> guids;
+    std::wstring stored(buffer.data());
+    size_t start = 0;
+    while (start < stored.size()) {
+        size_t end = stored.find(L'\n', start);
+        if (end == std::wstring::npos) end = stored.size();
+        if (end > start) guids.push_back(stored.substr(start, end - start));
+        start = end + 1;
+    }
+    return guids;
+}
+
+bool MonitorOn(const std::wstring& guid) {
+    std::vector<std::wstring> guids = MonitorGuids();
+    return std::find(guids.begin(), guids.end(), guid) != guids.end();
+}
+
+void SetMonitorOn(const std::wstring& guid, bool on) {
+    std::vector<std::wstring> guids = MonitorGuids();
+    guids.erase(std::remove(guids.begin(), guids.end(), guid), guids.end());
+    if (on) guids.push_back(guid);
+    std::wstring stored;
+    for (const std::wstring& g : guids) stored += g + L"\n";
+    Wh_SetStringValue(MONITOR_INDEX_VALUE, stored.c_str());
+}
+
+// Windows' own "Listen to this device" for an input: while it is on, Windows plays the input as well.
+bool ListenEnabled(const std::wstring& guid) {
+    std::wstring path = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture\\" + guid + L"\\Properties";
+    BYTE data[32]{};
+    DWORD size = sizeof(data);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, path.c_str(), L"{24dbb0fc-9311-4b3d-9cf0-18ff155639d4},1", RRF_RT_REG_BINARY,
+                     nullptr, data, &size) != ERROR_SUCCESS || size < 10) {
+        return false;
+    }
+    return data[8] == 0xFF && data[9] == 0xFF;  // A property variant: VARIANT_TRUE.
+}
+
+// The full id of an active input with this GUID, or empty.
+std::wstring CaptureDeviceId(const std::wstring& guid) {
+    std::wstring found;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDeviceCollection* devices = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator))) &&
+        SUCCEEDED(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &devices))) {
+        UINT count = 0;
+        devices->GetCount(&count);
+        for (UINT i = 0; i < count && found.empty(); ++i) {
+            IMMDevice* device = nullptr;
+            LPWSTR id = nullptr;
+            if (SUCCEEDED(devices->Item(i, &device)) && SUCCEEDED(device->GetId(&id)) && id) {
+                if (EndpointGuid(id) == guid) found = id;
+                CoTaskMemFree(id);
+            }
+            if (device) device->Release();
+        }
+    }
+    if (devices) devices->Release();
+    if (enumerator) enumerator->Release();
+    return found;
+}
+
 struct FxSettings {
     float gain = 1.0f;
     EqualizerState eq;
@@ -8242,6 +8324,10 @@ FxSettings BuildFxSettings(const std::wstring& exe) {
     settings.channels = LoadChannelMix(exe);
     std::wstring target = FxTarget(exe);
     settings.target = target == FX_FOLLOW_DEFAULT ? std::wstring() : target;
+    if (IsInputKey(exe)) {
+        DeviceGain boost = LoadDeviceGain(InputGuid(exe));
+        settings.gain = DeviceGainActive(boost) ? static_cast<float>(std::pow(10.0, boost.tenths / 200.0)) : 1.0f;
+    }
     return settings;
 }
 
@@ -8336,6 +8422,15 @@ void FxSettingsChanged(const std::wstring& exe) {
         if (known != g_fxNeeded.end() && known->second == needed) return;
         g_fxNeeded[exe] = needed;
     }
+    HWND window = g_hWnd.load();
+    if (window && !g_fxUpdatePending) {
+        g_fxUpdatePending = true;
+        PostMessageW(window, WM_APP_FX_UPDATE, 0, 0);
+    }
+}
+
+// An input was switched on or off: the streams are looked at again.
+void MonitorsChanged() {
     HWND window = g_hWnd.load();
     if (window && !g_fxUpdatePending) {
         g_fxUpdatePending = true;
@@ -8671,6 +8766,7 @@ void DownmixSurround(const float* in, float* out, size_t frames, const int* perc
 struct FxStream {
     DWORD pid = 0;
     std::wstring exe;
+    std::wstring inputId;  // An input listened to through the mixer: its id; empty for an app.
     std::wstring sink;  // Copied for the thread, which must not read g_fxSinkId.
     HANDLE thread = nullptr;
     HANDLE stop = nullptr;
@@ -8777,7 +8873,8 @@ DWORD WINAPI FxStreamThread(void* parameter) {
         }
     }
     const std::wstring sink = stream->sink;
-    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, stream->pid);
+    const bool monitor = !stream->inputId.empty();
+    HANDLE process = monitor ? nullptr : OpenProcess(SYNCHRONIZE, FALSE, stream->pid);
     HANDLE captured = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     IMMDeviceEnumerator* enumerator = nullptr;
     IAudioClient* capture = nullptr;
@@ -8828,14 +8925,27 @@ DWORD WINAPI FxStreamThread(void* parameter) {
             capture->Release();
             capture = nullptr;
         }
-        capture = ActivateProcessLoopback(stream->pid);
+        if (monitor) {
+            // An input: recorded like a microphone, not through the application loopback.
+            IMMDeviceEnumerator* inputs = nullptr;
+            IMMDevice* input = nullptr;
+            if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                           __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&inputs))) &&
+                SUCCEEDED(inputs->GetDevice(stream->inputId.c_str(), &input))) {
+                input->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr, reinterpret_cast<void**>(&capture));
+            }
+            if (input) input->Release();
+            if (inputs) inputs->Release();
+        } else {
+            capture = ActivateProcessLoopback(stream->pid);
+        }
         WAVEFORMATEX stereoFormat = FxFormat(isFloat, rate);
         WAVEFORMATEXTENSIBLE surroundFormat = SurroundFormat(rate);
         bool wide = captureChannels == SURROUND_CHANNELS && isFloat;
         const WAVEFORMATEX* format = wide ? &surroundFormat.Format : &stereoFormat;
         if (capture &&
             SUCCEEDED(capture->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                          AUDCLNT_STREAMFLAGS_LOOPBACK |
+                                          (monitor ? 0u : AUDCLNT_STREAMFLAGS_LOOPBACK) |
                                               AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
                                               AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                                           200000, 0, format, nullptr)) &&
@@ -8853,7 +8963,7 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     ULONGLONG lastPlayed = 0;
     ULONGLONG nextDefaultCheck = 0;
     ULONGLONG nextCeilingCheck = 0;
-    bool ok = captureClient && captured && sink.size() &&
+    bool ok = captureClient && captured && (monitor || sink.size()) &&
               SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                                          CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator),
                                          reinterpret_cast<void**>(&enumerator))) &&
@@ -8868,8 +8978,8 @@ DWORD WINAPI FxStreamThread(void* parameter) {
         syncLoudMax(settings);
         IAudioPolicyConfigFactory* config = nullptr;
         ok = OpenFxRender(enumerator, settings.target, sink, rate, &render) &&
-             (config = CreateAudioPolicyConfig()) != nullptr &&
-             SUCCEEDED(SetAppOutput(config, {stream->pid}, sink));
+             (monitor || ((config = CreateAudioPolicyConfig()) != nullptr &&
+                          SUCCEEDED(SetAppOutput(config, {stream->pid}, sink))));
         if (config) config->Release();
         if (ok) {
             Wh_Log(L"Mixer: processing %s (PID %lu)", stream->exe.c_str(), stream->pid);
@@ -9115,7 +9225,7 @@ void StopAllFx(bool restore) {
     IAudioPolicyConfigFactory* config = restore ? CreateAudioPolicyConfig() : nullptr;
     for (auto& stream : g_fxStreams) {
         StopFxStream(*stream);
-        if (config) RestoreFxRoute(config, stream->pid, stream->exe);
+        if (config && stream->inputId.empty()) RestoreFxRoute(config, stream->pid, stream->exe);
     }
     g_fxStreams.clear();
     if (config) config->Release();
@@ -9210,7 +9320,7 @@ void EnsureSinkSurround(bool wanted) {
 
 bool FxActiveForPid(DWORD pid) {
     for (const auto& stream : g_fxStreams) {
-        if (stream->pid == pid && stream->running) return true;
+        if (stream->inputId.empty() && stream->pid == pid && stream->running) return true;
     }
     return false;
 }
@@ -9284,11 +9394,22 @@ void UpdateFx(HWND window) {
     // The cable offers 7.1 while an app's channels are in use.
     EnsureSinkSurround(!ChannelMixApps().empty());
 
+    // The inputs that are listened to through the mixer.
+    std::vector<std::pair<std::wstring, std::wstring>> monitors;  // Settings name, device id.
+    for (const std::wstring& guid : MonitorGuids()) {
+        std::wstring id = CaptureDeviceId(guid);
+        if (id.empty()) continue;
+        PublishFxSettings(L"in:" + guid);
+        monitors.emplace_back(L"in:" + guid, id);
+    }
+
     // Stop what is no longer wanted, or failed.
     for (size_t i = 0; i < g_fxStreams.size();) {
         FxStream& stream = *g_fxStreams[i];
-        bool keep = stream.running && std::any_of(wanted.begin(), wanted.end(),
-            [&](const FxSession* s) { return s->pid == stream.pid; });
+        bool keep = stream.running && (stream.inputId.empty()
+            ? std::any_of(wanted.begin(), wanted.end(), [&](const FxSession* s) { return s->pid == stream.pid; })
+            : std::any_of(monitors.begin(), monitors.end(),
+                          [&](const std::pair<std::wstring, std::wstring>& m) { return m.second == stream.inputId; }));
         if (keep) {
             ++i;
             continue;
@@ -9296,7 +9417,7 @@ void UpdateFx(HWND window) {
         // Recording this app does not work here; leave it alone for a while.
         if (stream.failed) g_fxRetryAfter[stream.exe] = now + 600000;
         StopFxStream(stream);
-        RestoreFxRoute(config, stream.pid, stream.exe);
+        if (stream.inputId.empty()) RestoreFxRoute(config, stream.pid, stream.exe);
         g_fxStreams.erase(g_fxStreams.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
@@ -9322,6 +9443,25 @@ void UpdateFx(HWND window) {
             continue;
         }
         // The stream routes the app to the silent output once it is ready.
+        g_fxStreams.push_back(std::move(stream));
+    }
+
+    // Start the inputs that are listened to.
+    for (const auto& [key, id] : monitors) {
+        bool running = std::any_of(g_fxStreams.begin(), g_fxStreams.end(),
+                                   [&](const std::unique_ptr<FxStream>& s) { return s->inputId == id && s->running; });
+        auto retry = g_fxRetryAfter.find(key);
+        if (running || (retry != g_fxRetryAfter.end() && now < retry->second)) continue;
+        auto stream = std::make_unique<FxStream>();
+        stream->exe = key;
+        stream->inputId = id;
+        stream->sink = g_fxSinkId;
+        stream->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        stream->thread = stream->stop ? CreateThread(nullptr, 0, FxStreamThread, stream.get(), 0, nullptr) : nullptr;
+        if (!stream->thread) {
+            StopFxStream(*stream);
+            continue;
+        }
         g_fxStreams.push_back(std::move(stream));
     }
 
@@ -9717,7 +9857,9 @@ struct EqualizerPanel {
     ULONGLONG channelSaved = 0;
     bool namingLoud = false;    // The name being typed is for a loudness preset.
     ChannelMixState channels;   // Apps only: which surround channels are left out.
-    DeviceGain gain;            // Outputs only.
+    DeviceGain gain;            // Outputs, and inputs listened to through the mixer.
+    bool input = false;         // An input: its settings are kept like an app's, under "in:<GUID>".
+    bool monitorOn = false;
     bool gainDrag = false;
     ULONGLONG gainSaved = 0;
     ULONGLONG expertSaved = 0;
@@ -9733,8 +9875,8 @@ enum EqControl {
     EQ_LOUDNESS_TOGGLE, EQ_RELEASE_FIRST, EQ_LAYOUT_FIRST = EQ_RELEASE_FIRST + 6,
     EQ_EXPERT_RESET = EQ_LAYOUT_FIRST + 16, EQ_LOUD_PRESETS, EQ_EXPERT_FIRST,
     EQ_CHANNELS_TOGGLE = EQ_EXPERT_FIRST + LOUD_PARAMS, EQ_CHANNEL_FIRST,
-    EQ_GAIN_TOGGLE = EQ_CHANNEL_FIRST + SURROUND_CHANNELS, EQ_GAIN_SLIDER,
-    EQ_INFO_LOUDMAX, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_GAIN, EQ_INFO_FIRST,
+    EQ_GAIN_TOGGLE = EQ_CHANNEL_FIRST + SURROUND_CHANNELS, EQ_GAIN_SLIDER, EQ_MONITOR_TOGGLE,
+    EQ_INFO_LOUDMAX, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_GAIN, EQ_INFO_MONITOR, EQ_INFO_FIRST,
 };
 
 // Where everything sits, for the current page.
@@ -9750,6 +9892,7 @@ struct EqGeometry {
     RECT infoLoudMax, infoLoudness, info[LOUD_PARAMS];  // The (i) marks.
     RECT channelsRow, channelsToggle, infoChannels, channelCaption, channelChip[SURROUND_CHANNELS];
     RECT gainRow, gainToggle, infoGain, gainValue, gainTrack, gainNote;
+    RECT monitorRow, monitorToggle, infoMonitor, monitorNote;
     RECT footer;
     int height;
 };
@@ -9767,6 +9910,15 @@ EqGeometry EqMeasure(int width) {
     at.close = {width - Scale(47), Scale(9), width - Scale(15), Scale(41)};
     int y = Scale(68);
     if (g_eq.effects) {
+        if (g_eq.input) {
+            // Listening to the input through the mixer: a switch and a note.
+            at.monitorRow = {Scale(12), y, width - Scale(12), y + Scale(92)};
+            int middle = y + Scale(26);
+            at.monitorToggle = {width - Scale(66), middle - Scale(10), width - Scale(26), middle + Scale(10)};
+            at.infoMonitor = {at.monitorToggle.left - Scale(30), middle - Scale(9), at.monitorToggle.left - Scale(12), middle + Scale(9)};
+            at.monitorNote = {Scale(28), y + Scale(48), width - Scale(28), y + Scale(86)};
+            y += Scale(96);
+        }
         if (g_eq.loudMaxShown) {
             at.loudMaxRow = {Scale(12), y, width - Scale(12), y + Scale(52)};
             int middle = y + Scale(26);
@@ -9778,7 +9930,7 @@ EqGeometry EqMeasure(int width) {
                               middle + Scale(9)};
             y += Scale(56);
         }
-        if (g_eq.app.empty()) {
+        if (g_eq.app.empty() || g_eq.input) {
             // The gain of the output: a switch, the value, and a slider.
             at.gainRow = {Scale(12), y, width - Scale(12), y + Scale(112)};
             int middle = y + Scale(26);
@@ -9820,6 +9972,7 @@ EqGeometry EqMeasure(int width) {
                 }
             }
             y += rowHeight + Scale(4);
+            if (!g_eq.input) {
             // The surround channels: a switch, and one chip for each channel.
             at.channelsRow = {Scale(12), y, width - Scale(12), y + Scale(172)};
             int channelsMiddle = y + Scale(22);
@@ -9834,6 +9987,7 @@ EqGeometry EqMeasure(int width) {
                 at.channelChip[i] = {left + Scale(2), y + Scale(58), left + chipWidth - Scale(2), y + Scale(164)};
             }
             y += Scale(176);
+            }
         }
         y = std::max(y, Scale(394));  // As tall as the equalizer.
     } else {
@@ -9893,6 +10047,12 @@ const wchar_t* EqInfoText(int control) {
                L"when it starts). While it is on, the silent VB-CABLE output is set to 7.1; it goes "
                L"back to stereo when no app uses it. Apps that play stereo are not changed.";
     }
+    if (control == EQ_INFO_MONITOR) {
+        return L"Headroom records this input, applies the equalizer and the effects below, and plays it on your "
+               L"default output, about 40 ms later (a little less with the Comp loudness mode). Use it for a "
+               L"line-in, for example a console. If Windows is already playing the input (the Listen to this "
+               L"device setting of the input), turn that off, or you hear it twice.";
+    }
     if (control == EQ_INFO_GAIN) {
         return L"Raises everything that plays on this output, by up to 12 dB, for a device that is too "
                L"quiet. With Equalizer APO it works for all sound, system sounds included. With the mixer's own "
@@ -9920,7 +10080,7 @@ void UpdateEqInfoTip(int control) {
         HideInfoTip();
         return;
     }
-    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS && control != EQ_INFO_GAIN &&
+    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS && control != EQ_INFO_GAIN && control != EQ_INFO_MONITOR &&
         (control < EQ_INFO_FIRST || control >= EQ_INFO_FIRST + LOUD_PARAMS)) {
         HideInfoTip();
         return;
@@ -9929,6 +10089,7 @@ void UpdateEqInfoTip(int control) {
               : control == EQ_INFO_LOUDNESS ? g_eqAt.infoLoudness
               : control == EQ_INFO_CHANNELS ? g_eqAt.infoChannels
               : control == EQ_INFO_GAIN ? g_eqAt.infoGain
+              : control == EQ_INFO_MONITOR ? g_eqAt.infoMonitor
                                             : g_eqAt.info[control - EQ_INFO_FIRST];
     MapWindowPoints(g_eq.window, nullptr, reinterpret_cast<POINT*>(&rect), 2);
     ShowInfoTip(g_eq.window, rect, EqInfoText(control));
@@ -9978,12 +10139,16 @@ int EqControlAt(POINT point) {
     const EqGeometry& at = g_eqAt;
     if (PtInRect(&at.close, point)) return EQ_CLOSE;
     if (g_eq.effects) {
+        if (g_eq.input) {
+            if (PtInRect(&at.monitorToggle, point)) return EQ_MONITOR_TOGGLE;
+            if (PtInRect(&at.infoMonitor, point)) return EQ_INFO_MONITOR;
+        }
         if (g_eq.loudMaxShown && g_eq.loudMaxUsable) {
             if (PtInRect(&at.loudMaxToggle, point)) return EQ_LM_TOGGLE;
             if (PtInRect(&at.infoLoudMax, point)) return EQ_INFO_LOUDMAX;
             if (PtInRect(&at.loudMaxSettings, point)) return EQ_LM_SETTINGS;
         }
-        if (g_eq.app.empty()) {
+        if (g_eq.app.empty() || g_eq.input) {
             if (PtInRect(&at.gainToggle, point)) return EQ_GAIN_TOGGLE;
             if (PtInRect(&at.infoGain, point)) return EQ_INFO_GAIN;
             if (PtInRect(&at.gainTrack, point)) return EQ_GAIN_SLIDER;
@@ -9994,9 +10159,9 @@ int EqControlAt(POINT point) {
                 if (PtInRect(&at.release[i], point)) return EQ_RELEASE_FIRST + i;
             }
             if (PtInRect(&at.infoLoudness, point)) return EQ_INFO_LOUDNESS;
-            if (PtInRect(&at.channelsToggle, point)) return EQ_CHANNELS_TOGGLE;
-            if (PtInRect(&at.infoChannels, point)) return EQ_INFO_CHANNELS;
-            for (int i = 0; i < SURROUND_CHANNELS; ++i) {
+            if (!g_eq.input && PtInRect(&at.channelsToggle, point)) return EQ_CHANNELS_TOGGLE;
+            if (!g_eq.input && PtInRect(&at.infoChannels, point)) return EQ_INFO_CHANNELS;
+            for (int i = 0; i < SURROUND_CHANNELS && !g_eq.input; ++i) {
                 if (PtInRect(&at.channelChip[i], point)) return EQ_CHANNEL_FIRST + i;
             }
             if (g_eq.loudness.release == 4) {
@@ -10199,8 +10364,12 @@ void SetGainFromPoint(POINT point, bool now) {
     if (now || tick - g_eq.gainSaved >= 100) {
         g_eq.gainSaved = tick;
         SaveDeviceGain(g_eq.guid, g_eq.gain);
-        AddEqualizerDevice(g_eq.guid);
-        g_eq.failed = !WriteEqualizerConfig();
+        if (g_eq.input) {
+            FxSettingsChanged(g_eq.app);
+        } else {
+            AddEqualizerDevice(g_eq.guid);
+            g_eq.failed = !WriteEqualizerConfig();
+        }
     }
     PaintEqualizer();
 }
@@ -10427,8 +10596,25 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         }
     }
 
+    // Listening to an input through the mixer.
+    if (g_eq.effects && g_eq.input) {
+        const RECT& row = at.monitorRow;
+        DrawSurface(dc, row, Radius(16), g_theme.panel);
+        RECT name{row.left + Scale(16), row.top + Scale(8), at.infoMonitor.left - Scale(4), row.top + Scale(44)};
+        DrawLabel(dc, L"Listen through Headroom", name, g_bodyFont, g_theme.text,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawInfoMark(dc, at.infoMonitor, g_eq.control == EQ_INFO_MONITOR);
+        DrawEqToggle(dc, g, at.monitorToggle, g_eq.monitorOn, g_eq.control == EQ_MONITOR_TOGGLE);
+        bool twice = g_eq.monitorOn && ListenEnabled(InputGuid(g_eq.app));
+        PCWSTR note = twice ? L"Windows plays this input as well (Listen to this device). Turn that off in the Sound settings, or you hear it twice."
+                    : g_eq.monitorOn ? L"Plays on your default output, with this equalizer and these effects."
+                                     : L"Off: Headroom does not play this input.";
+        DrawLabel(dc, note, at.monitorNote, g_smallFont, twice ? g_theme.accent : g_theme.secondaryText,
+                  DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
+
     // The gain of an output.
-    if (g_eq.effects && g_eq.app.empty()) {
+    if (g_eq.effects && (g_eq.app.empty() || g_eq.input)) {
         const RECT& row = at.gainRow;
         DrawSurface(dc, row, Radius(16), g_theme.panel);
         RECT name{row.left + Scale(16), row.top + Scale(8), at.infoGain.left - Scale(4), row.top + Scale(44)};
@@ -10445,7 +10631,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         ThumbState thumb = g_eq.gainDrag ? ThumbState::Pressed
                            : g_eq.control == EQ_GAIN_SLIDER ? ThumbState::Hover : ThumbState::Rest;
         DrawEqHSlider(dc, g, left, right, y, position, thumb, g_eq.gain.on);
-        bool limiter = !UseApoForDevices() || (g_eq.loudMaxShown && g_eq.loudMaxUsable && g_eq.loudMax.on);
+        bool limiter = g_eq.input || !UseApoForDevices() || (g_eq.loudMaxShown && g_eq.loudMaxUsable && g_eq.loudMax.on);
         PCWSTR note = !g_eq.gain.on ? L"Raises the volume of an output that is too quiet."
                     : !limiter && g_eq.gain.tenths >= 30
                         ? L"No limiter: loud sounds can crackle. Turn LoudMax on above."
@@ -10538,7 +10724,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
     }
 
     // The surround channels of the app.
-    if (g_eq.effects && !g_eq.app.empty()) {
+    if (g_eq.effects && !g_eq.app.empty() && !g_eq.input) {
         const RECT& row = at.channelsRow;
         DrawSurface(dc, row, Radius(16), g_theme.panel);
         RECT name{row.left + Scale(16), row.top + Scale(8), at.infoChannels.left - Scale(4), row.top + Scale(36)};
@@ -10861,6 +11047,12 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
         g_eq.state = LoadAppEqualizer(app);
         g_eq.loudness = LoadLoudness(app);
         g_eq.channels = LoadChannelMix(app);
+        g_eq.input = IsInputKey(app);
+        if (g_eq.input) {
+            g_eq.guid = InputGuid(app);
+            g_eq.monitorOn = MonitorOn(g_eq.guid);
+            g_eq.gain = LoadDeviceGain(g_eq.guid);
+        }
         g_eq.loudMaxShown = LoudMaxForOutputs() || LoudMaxForApps();
         g_eq.loudMaxUsable = LoudMaxForApps();
         if (!g_eq.loudMaxUsable) {
@@ -11008,12 +11200,23 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     ShowLoudPresetMenu(owner);
                 } else if (control >= EQ_INFO_LOUDMAX) {
                     // The (i) marks only explain, on hover.
+                } else if (control == EQ_MONITOR_TOGGLE) {
+                    g_eq.monitorOn = !g_eq.monitorOn;
+                    SetMonitorOn(g_eq.guid, g_eq.monitorOn);
+                    g_fxRetryAfter.erase(g_eq.app);
+                    FxSettingsChanged(g_eq.app);
+                    MonitorsChanged();
+                    PaintEqualizer();
                 } else if (control == EQ_GAIN_TOGGLE) {
                     g_eq.gain.on = !g_eq.gain.on;
                     if (g_eq.gain.on && g_eq.gain.tenths == 0) g_eq.gain.tenths = 30;  // Starts at +3 dB.
                     SaveDeviceGain(g_eq.guid, g_eq.gain);
-                    AddEqualizerDevice(g_eq.guid);
-                    g_eq.failed = !WriteEqualizerConfig();
+                    if (g_eq.input) {
+                        FxSettingsChanged(g_eq.app);
+                    } else {
+                        AddEqualizerDevice(g_eq.guid);
+                        g_eq.failed = !WriteEqualizerConfig();
+                    }
                     PaintEqualizer();
                 } else if (control == EQ_GAIN_SLIDER) {
                     g_eq.gainDrag = true;
@@ -11515,6 +11718,9 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
             add(MOVE_ALL_APPS, L"Move all apps here", L"\uE8AB", false);
             add(EQUALIZER, L"Equalizer", L"\uE9E9", false);
             add(EFFECTS, L"Effects", L"\uE9D9", false);
+        } else {
+            add(EQUALIZER, L"Equalizer", L"\uE9E9", false);
+            add(EFFECTS, L"Effects and listening", L"\uE9D9", false);
         }
     } else if (g_flow == eRender) {
         add(OUTPUT, L"Output device", L"\uE7F5", !routable);
@@ -11667,7 +11873,9 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
 
     if (command == EQUALIZER || command == EFFECTS) {
         bool effects = command == EFFECTS;
-        if (device) {
+        if (device && g_flow == eCapture) {
+            RunEqualizer(window, L"", (*g_apps)[row].name, InputKey(deviceId), effects);
+        } else if (device) {
             RunEqualizer(window, deviceId, (*g_apps)[row].name, L"", effects);
         } else {
             std::wstring name = row < static_cast<int>(g_apps->size())
