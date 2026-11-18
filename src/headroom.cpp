@@ -599,6 +599,8 @@ void LoadPermanentlyHiddenSources() {
         if (end > start) g_permanentlyHiddenSources.insert(stored.substr(start, end - start));
         start = end + 1;
     }
+    Wh_Log(L"Mixer: the list of hidden sources was read: %d entries, System sounds %s", static_cast<int>(g_permanentlyHiddenSources.size()),
+           g_permanentlyHiddenSources.count(L"systemSounds:everyOutput") ? L"hidden" : L"not hidden");
 }
 
 // Names given from the context menu, kept in the mod's storage per source.
@@ -628,6 +630,8 @@ bool SaveSourceName(const std::wstring& key, const std::wstring& name) {
 }
 
 bool SavePermanentlyHiddenSources() {
+    Wh_Log(L"Mixer: the list of hidden sources is saved: %d entries, System sounds %s", static_cast<int>(g_permanentlyHiddenSources.size()),
+           g_permanentlyHiddenSources.count(L"systemSounds:everyOutput") ? L"hidden" : L"not hidden");
     if (g_permanentlyHiddenSources.empty()) {
         Wh_DeleteValue(PERMANENTLY_HIDDEN_VALUE);
         return true;
