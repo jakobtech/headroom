@@ -2695,6 +2695,12 @@ void RefreshAudioSessions(HWND hWnd, bool diagnostics = false) {
         }
     }
     std::stable_sort(g_apps->begin(), g_apps->end(), AppSortOrder);
+    if (diagnostics) {
+        std::wstring names;
+        for (const auto& app : *g_apps) names += (names.empty() ? L"" : L", ") + app.name;
+        Wh_Log(L"Mixer: the list shows: %s (System sounds hidden: %d)", names.c_str(),
+               g_permanentlyHiddenSources.count(SYSTEM_SOUNDS_KEY) != 0 ? 1 : 0);
+    }
 
     RestoreSelectedRow();
     g_audioAvailable = (g_flow == eCapture ? g_inputVolume : g_endpointVolume) != nullptr ||
