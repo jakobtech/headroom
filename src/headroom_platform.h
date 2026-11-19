@@ -62,6 +62,7 @@ struct LogState {
     HANDLE file = INVALID_HANDLE_VALUE;
     unsigned written = 0;
     bool ready = false;
+    ULONGLONG nextTry = 0;  // When opening the file may be tried again, after it failed.
 };
 inline LogState& Log() {
     static LogState state;
@@ -83,10 +84,9 @@ inline std::wstring FromUtf8(const char* data, size_t size) {
     return out;
 }
 
-inline void InitLog() {
-    LogState& s = Log();
-    if (s.ready) return;
-    InitializeCriticalSection(&s.lock);
+// Opens the log, after an old one over 1 MB has been put aside. If it cannot be opened (something may hold the
+// file at start-up), the next write tries again a few seconds later, so a session is never left without a log.
+inline void OpenLogFile(LogState& s) {
     std::wstring path = LogDir() + L"\\log.txt";
     WIN32_FILE_ATTRIBUTE_DATA info;
     if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) &&
@@ -95,6 +95,14 @@ inline void InitLog() {
     }
     s.file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (s.file == INVALID_HANDLE_VALUE) s.nextTry = GetTickCount64() + 3000;
+}
+
+inline void InitLog() {
+    LogState& s = Log();
+    if (s.ready) return;
+    InitializeCriticalSection(&s.lock);
+    OpenLogFile(s);
     s.ready = true;
 }
 
@@ -115,6 +123,7 @@ inline void LogV(PCWSTR format, va_list args) {
     if (m <= 0) return;
     std::string utf8 = ToUtf8(std::wstring(line, (size_t)m));
     EnterCriticalSection(&s.lock);
+    if (s.file == INVALID_HANDLE_VALUE && GetTickCount64() >= s.nextTry) OpenLogFile(s);
     if (s.file != INVALID_HANDLE_VALUE) {
         DWORD written;
         WriteFile(s.file, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
