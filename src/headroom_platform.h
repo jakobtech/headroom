@@ -149,6 +149,7 @@ struct StoreState {
     bool dirty = false;
     bool ready = false;
     bool existedAtStart = false;
+    bool loadFailed = false;  // The file is there but could not be read: nothing is written over it.
     HANDLE wake = nullptr;
     HANDLE thread = nullptr;
     volatile LONG stop = 0;
@@ -188,6 +189,7 @@ inline std::wstring Unescape(const char* data, size_t size) {
 
 inline void WriteStoreLocked() {
     StoreState& s = Store();
+    if (s.loadFailed) return;  // What is kept is not known: the file must not be replaced by an empty one.
     std::string text;
     for (const auto& [key, value] : s.map) {
         text += Escape(key);
@@ -274,9 +276,29 @@ inline void ReplaceStore(const std::string& data) {
 
 inline void LoadStore() {
     StoreState& s = Store();
-    HANDLE f = CreateFileW(StorePath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return;
+    // Right after logging in, the folder may not be ready, or something (a scanner, a sync) may hold the file for a
+    // moment. A file that is there but cannot be read is waited for, up to ten seconds: starting without the
+    // settings would show everything at its default, and the first change would overwrite the saved file.
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        f = CreateFileW(StorePath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) break;
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            if (attempt >= 5) return;  // Really no file (a first start), also after the folder had time to appear.
+        }
+        Sleep(200);
+    }
+    if (f == INVALID_HANDLE_VALUE) {
+        if (GetFileAttributesW(StorePath().c_str()) != INVALID_FILE_ATTRIBUTES) {
+            s.loadFailed = true;
+            s.existedAtStart = true;
+            LogF(L"Store: %ls could not be read after ten seconds, error %lu: nothing is written to it", StorePath().c_str(),
+                 GetLastError());
+        }
+        return;
+    }
     s.existedAtStart = true;
     LARGE_INTEGER size;
     std::string data;
