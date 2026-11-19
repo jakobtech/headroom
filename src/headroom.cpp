@@ -9590,7 +9590,8 @@ void UpdateFx(HWND window) {
             continue;
         }
         // Recording this app does not work here; leave it alone for a while.
-        if (stream.failed) g_fxRetryAfter[stream.exe] = now + 600000;
+        // An input that is not ready yet (just after the start of Windows) is tried again soon.
+        if (stream.failed) g_fxRetryAfter[stream.exe] = now + (stream.inputId.empty() ? 600000 : 5000);
         StopFxStream(stream);
         if (stream.inputId.empty()) RestoreFxRoute(config, stream.pid, stream.exe);
         g_fxStreams.erase(g_fxStreams.begin() + static_cast<std::ptrdiff_t>(i));
