@@ -9122,6 +9122,9 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     ULONGLONG lastGrow = 0;
     ULONGLONG nextDefaultCheck = 0;
     ULONGLONG nextCeilingCheck = 0;
+    ULONGLONG nextPeakLog = 0;
+    float peak = 0.0f;
+    int peakLogs = 0;
     bool ok = captureClient && captured && (monitor || sink.size()) &&
               SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                                          CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator),
@@ -9197,6 +9200,14 @@ DWORD WINAPI FxStreamThread(void* parameter) {
             chain.ceiling = FxCeiling(enumerator, render.deviceId);
         }
 
+        if (monitor && now >= nextPeakLog) {
+            nextPeakLog = now + 5000;
+            if (++peakLogs <= 6) {
+                Wh_Log(L"Mixer: input %s: loudest sample %.4f in the last seconds, output '%s'", stream->inputId.c_str(), peak,
+                       render.client ? render.deviceId.c_str() : L"none open");
+            }
+            peak = 0.0f;
+        }
         // Everything the app played since the last wake.
         UINT32 packet = 0;
         while (SUCCEEDED(captureClient->GetNextPacketSize(&packet)) && packet) {
@@ -9225,6 +9236,9 @@ DWORD WINAPI FxStreamThread(void* parameter) {
                 }
             }
             captureClient->ReleaseBuffer(frames);
+            if (monitor) {
+                for (size_t i = 0; i < static_cast<size_t>(frames) * 2; ++i) peak = std::max(peak, std::fabs(out[i]));
+            }
             chain.Process(out, frames, !loudMax.effect && !deviceStage);
             loudMax.Process(out, frames);
             if (deviceStage) {
