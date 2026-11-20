@@ -312,6 +312,32 @@ inline void LoadStore() {
     ParseStoreData(data);
 }
 
+// After a start-up where the file could not be read: tries once more. When it works, the settings are in place
+// and writing is allowed again; the caller then lets the app pick them up. Returns true exactly once, then.
+inline bool RetryLoadStore() {
+    StoreState& s = Store();
+    if (!s.loadFailed) return false;
+    HANDLE f = CreateFileW(StorePath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size;
+    std::string data;
+    bool good = false;
+    if (GetFileSizeEx(f, &size) && size.QuadPart < 64 * 1024 * 1024) {
+        data.resize((size_t)size.QuadPart);
+        DWORD read = 0;
+        good = ReadFile(f, data.data(), (DWORD)data.size(), &read, nullptr) && read == data.size();
+    }
+    CloseHandle(f);
+    if (!good) return false;
+    EnterCriticalSection(&s.lock);
+    ParseStoreData(data);  // What the file holds wins; what only this session set stays.
+    s.loadFailed = false;
+    LeaveCriticalSection(&s.lock);
+    LogF(L"Store: %ls could be read now, the settings are loaded", StorePath().c_str());
+    return true;
+}
+
 inline bool StoreGet(const std::wstring& key, std::wstring* value) {
     StoreState& s = Store();
     EnterCriticalSection(&s.lock);

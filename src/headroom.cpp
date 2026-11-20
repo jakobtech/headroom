@@ -12436,6 +12436,8 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam,
 
         case WM_TIMER:
             if (wParam == TIMER_FX) {
+                // Settings that could not be read at start-up are loaded as soon as the file can be read.
+                if (headroom::RetryLoadStore()) PostMessageW(hWnd, WM_APP_RELOAD_SETTINGS, 0, 0);
                 UpdateFx(hWnd);
                 return 0;
             }
