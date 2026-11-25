@@ -9092,36 +9092,59 @@ float FxCeiling(IMMDeviceEnumerator* enumerator, const std::wstring& id) {
     return ceiling;
 }
 
-// Lets a queue's samples through to its output: as many as keep about queueMs queued there, and never the last
-// `hold` samples, which are that output's delay. What piles up when two devices' clocks drift apart is dropped.
+// Lets a queue's samples through to its output, and keeps how late the output plays the same from one start to the
+// next, so that two outputs lined up once stay lined up:
+//  - An output starts (and starts again after running dry) only when `queueMs` of sound is ready: the sound then
+//    waits the same time in the device every time, not as long as it happened to be queued.
+//  - What is queued in the device and in the queue together is kept at that amount: when the delay of an output is
+//    made smaller, what was held back for it is dropped instead of staying as extra delay.
+// The last `hold` samples are never let through: they are that output's delay. What piles up when two devices'
+// clocks drift apart is dropped.
 struct PumpResult {
     UINT32 padding = 0;  // Already queued in the device before this call.
     size_t ready = 0;    // Samples that could be let through.
     bool wrote = false;
 };
 
-PumpResult PumpOutput(FxRender& output, std::vector<float>& queue, size_t hold, DWORD rate, int queueMs) {
+PumpResult PumpOutput(FxRender& output, std::vector<float>& queue, size_t hold, DWORD rate, int queueMs, bool& primed) {
     PumpResult result;
     result.ready = queue.size() > hold ? queue.size() - hold : 0;
     if (output.client) {
         UINT32 padding = 0;
         HRESULT state = output.client->GetCurrentPadding(&padding);
+        const UINT32 wanted = rate * queueMs / 1000;
         if (state == AUDCLNT_E_DEVICE_INVALIDATED) {
             output.Close();
+            primed = false;
         } else if (SUCCEEDED(state)) {
             result.padding = padding;
-            UINT32 wanted = rate * queueMs / 1000;
-            UINT32 room = padding < wanted ? wanted - padding : 0;
-            room = std::min(room, output.frames - std::min(output.frames, padding));
-            UINT32 frames = std::min<UINT32>(room, static_cast<UINT32>(result.ready / 2));
-            BYTE* target = nullptr;
-            if (frames && SUCCEEDED(output.render->GetBuffer(frames, &target))) {
-                memcpy(target, queue.data(), static_cast<size_t>(frames) * 2 * sizeof(float));
-                output.render->ReleaseBuffer(frames, 0);
-                queue.erase(queue.begin(), queue.begin() + static_cast<size_t>(frames) * 2);
-                result.wrote = true;
+            if (padding == 0) primed = false;  // Just opened, or it ran dry.
+            if (!primed && result.ready / 2 >= wanted) primed = true;
+            UINT32 frames = 0;
+            if (primed) {
+                UINT32 room = padding < wanted ? wanted - padding : 0;
+                room = std::min(room, output.frames - std::min(output.frames, padding));
+                frames = std::min<UINT32>(room, static_cast<UINT32>(result.ready / 2));
+                BYTE* target = nullptr;
+                if (frames && SUCCEEDED(output.render->GetBuffer(frames, &target))) {
+                    memcpy(target, queue.data(), static_cast<size_t>(frames) * 2 * sizeof(float));
+                    output.render->ReleaseBuffer(frames, 0);
+                    queue.erase(queue.begin(), queue.begin() + static_cast<size_t>(frames) * 2);
+                    result.wrote = true;
+                } else {
+                    frames = 0;
+                }
+                size_t left = queue.size() > hold ? (queue.size() - hold) / 2 : 0;
+                size_t total = padding + frames + left;
+                size_t tolerance = static_cast<size_t>(rate) * 12 / 1000;  // What arrives between two passes.
+                if (total > wanted + tolerance) {
+                    size_t drop = std::min<size_t>(total - wanted, left);
+                    queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(drop * 2));
+                }
             }
         }
+    } else {
+        primed = false;
     }
     size_t limit = static_cast<size_t>(rate) / 10 * 2;  // 100 ms.
     if (queue.size() > hold + limit) {
@@ -9148,6 +9171,7 @@ DWORD WINAPI MirrorTestThread(void*) {
     IMMDeviceEnumerator* enumerator = nullptr;
     FxRender one, two;
     std::vector<float> queueOne, queueTwo;
+    bool primedOne = false, primedTwo = false;
     if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
                                    __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator)))) {
         OpenFxRender(enumerator, g_mirrorTest.first, L"", rate, &one, true);
@@ -9178,8 +9202,8 @@ DWORD WINAPI MirrorTestThread(void*) {
         }
         int offset = g_mirrorTestOffset.load();
         size_t delay = static_cast<size_t>(std::abs(offset)) * rate / 1000 * 2;
-        PumpOutput(one, queueOne, offset < 0 ? delay : 0, rate, 30);
-        PumpOutput(two, queueTwo, offset > 0 ? delay : 0, rate, 30);
+        PumpOutput(one, queueOne, offset < 0 ? delay : 0, rate, 30, primedOne);
+        PumpOutput(two, queueTwo, offset > 0 ? delay : 0, rate, 30, primedTwo);
         if (!one.client) queueOne.clear();
         if (!two.client) queueTwo.clear();
     }
@@ -9246,6 +9270,7 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     std::vector<float> mirrorQueue;  // Processed stereo samples waiting for the second output.
     std::wstring mirrorWanted;       // The second output the settings ask for, empty for none.
     size_t holdMain = 0, holdMirror = 0;  // Samples kept back in a queue: the delay of that output.
+    bool primedMain = false, primedMirror = false;
     ULONGLONG nextMirrorTry = 0;
     DeviceFx deviceFx;
     bool deviceStage = false;
@@ -9494,7 +9519,7 @@ DWORD WINAPI FxStreamThread(void* parameter) {
         // Keep about 40 ms queued in each output; drop what piles up when the devices' clocks drift apart.
         // What an output is delayed by stays in its queue and is let through later.
         auto feed = [&](FxRender& output, std::vector<float>& queue, size_t hold, bool first) {
-            PumpResult pumped = PumpOutput(output, queue, hold, rate, queueMs + extraMs);
+            PumpResult pumped = PumpOutput(output, queue, hold, rate, queueMs + extraMs, first ? primedMain : primedMirror);
             if (!first) return;
             if (output.client && pumped.padding == 0 && pumped.ready && lastPlayed && now - lastPlayed < 60 &&
                 extraMs < 25 && now - started > 3000 && now - lastGrow > 2000) {
