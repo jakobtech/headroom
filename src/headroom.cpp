@@ -76,6 +76,12 @@
   $options:
   - "on": "On"
   - "off": "Off"
+- advancedEqualizer: "off"
+  $name: Advanced equalizer
+  $description: Off shows only the Basic equalizer (bass, mids, treble). On adds the choice of 5, 10 or 15 bands for fine tuning on top of Basic.
+  $options:
+  - "on": "On"
+  - "off": "Off"
 - switchCommunicationsDevice: true
   $name: Also switch the communications device
   $description: When you pick a playback device in the mixer, also make it the default communications device, like Windows Settings does. Calling apps such as Teams, Zoom or Discord then follow the switch. Turn off to keep the communications device unchanged.
@@ -263,6 +269,7 @@ struct Settings {
     bool switchCommunicationsDevice = true;
     std::wstring loudMaxPath;
     bool loudMaxEnabled = true;  // Off: it is hidden and not used.
+    bool advancedEqualizer = false;  // Off: only Basic is shown.
     bool animations = true;
     int backgroundOpacity = 85;
     std::wstring backgroundEffect = L"blur";
@@ -789,6 +796,11 @@ void LoadSettings() {
     g_settings.moveNotifications = Wh_GetIntSetting(L"moveNotifications") != 0;
     g_settings.switchCommunicationsDevice =
         Wh_GetIntSetting(L"switchCommunicationsDevice") != 0;
+    {
+        WindhawkUtils::StringSetting advancedEqualizer = WindhawkUtils::StringSetting::make(L"advancedEqualizer");
+        std::wstring value = advancedEqualizer.get();
+        g_settings.advancedEqualizer = value == L"on";
+    }
     {
         WindhawkUtils::StringSetting loudMaxEnabled = WindhawkUtils::StringSetting::make(L"loudMaxEnabled");
         std::wstring value = loudMaxEnabled.get();
@@ -7250,6 +7262,7 @@ const EqLayout EQ_LAYOUTS[] = {
 };
 constexpr int EQ_TONE_BANDS = 3;
 constexpr int EQ_DEFAULT_BANDS = EQ_TONE_BANDS;
+constexpr int EQ_FILTERS = EQ_MAX_BANDS + EQ_TONE_BANDS;  // Basic, and the fine tuning on top of it.
 constexpr int EQ_HARD_MAX = 600;  // Tenths of a decibel: the most a saved band can hold, +-60 dB.
 
 // How far the faders go: +-12 dB, or what the settings allow.
@@ -7265,11 +7278,46 @@ const EqLayout& EqLayoutFor(int count) {
 }
 constexpr PCWSTR EQ_INDEX_VALUE = L"eqDevices_v1";
 
+// An equalizer is two layers that both play: Basic (bass, mids, treble), and a fine tuning of 5, 10, 15 or 31 bands on
+// top of it. `bands` and `gains` are the layer that is shown; the other one, `hidden`, stays applied underneath. So
+// going from Basic to 15 bands does not change the sound: the fine tuning starts at zero and adds to Basic.
 struct EqualizerState {
     bool on = false;
-    int bands = EQ_DEFAULT_BANDS;
+    int bands = EQ_DEFAULT_BANDS;  // The layer shown: 3 (Basic), 5, 10, 15 or 31.
     int gains[EQ_MAX_BANDS] = {};  // Tenths of a decibel.
+    int hiddenBands = 0;           // The layer not shown: Basic when the fine tuning is shown, else the fine tuning (0: none).
+    int hidden[EQ_MAX_BANDS] = {};
 };
+
+bool EqualizerHasGain(const EqualizerState& state) {
+    for (int band = 0; band < state.bands; ++band) {
+        if (state.gains[band]) return true;
+    }
+    for (int band = 0; band < state.hiddenBands; ++band) {
+        if (state.hidden[band]) return true;
+    }
+    return false;
+}
+
+struct EqLayers {
+    int tone[EQ_TONE_BANDS] = {};
+    int detailBands = 0;  // 0: no fine tuning.
+    int detail[EQ_MAX_BANDS] = {};
+};
+
+EqLayers EqualizerLayers(const EqualizerState& state) {
+    EqLayers layers;
+    if (state.bands == EQ_TONE_BANDS) {
+        std::copy(state.gains, state.gains + EQ_TONE_BANDS, layers.tone);
+        layers.detailBands = state.hiddenBands;
+        std::copy(state.hidden, state.hidden + EQ_MAX_BANDS, layers.detail);
+    } else {
+        if (state.hiddenBands == EQ_TONE_BANDS) std::copy(state.hidden, state.hidden + EQ_TONE_BANDS, layers.tone);
+        layers.detailBands = state.bands;
+        std::copy(state.gains, state.gains + EQ_MAX_BANDS, layers.detail);
+    }
+    return layers;
+}
 
 // Carries a curve over to another number of bands, reading the old curve
 // between its bands on a logarithmic frequency scale.
@@ -7301,16 +7349,76 @@ EqualizerState ResampleEqualizer(const EqualizerState& from, int count) {
     return to;
 }
 
+// Shows another layout without changing the sound: from Basic to a fine tuning layout, the fine tuning comes up (at zero
+// the first time) with Basic kept underneath; back to Basic, the fine tuning goes underneath; between fine tuning
+// layouts, the curve is read over to the new bands as before.
+void SwitchEqualizerView(EqualizerState& state, int count) {
+    count = EqLayoutFor(count).count;
+    if (count == state.bands) return;
+    EqualizerState next;
+    next.on = state.on;
+    next.bands = count;
+    if (state.bands == EQ_TONE_BANDS) {
+        if (state.hiddenBands == count) {
+            std::copy(state.hidden, state.hidden + EQ_MAX_BANDS, next.gains);
+        } else if (state.hiddenBands) {
+            EqualizerState detail;
+            detail.bands = state.hiddenBands;
+            std::copy(state.hidden, state.hidden + EQ_MAX_BANDS, detail.gains);
+            EqualizerState moved = ResampleEqualizer(detail, count);
+            std::copy(moved.gains, moved.gains + EQ_MAX_BANDS, next.gains);
+        }
+        next.hiddenBands = EQ_TONE_BANDS;
+        std::copy(state.gains, state.gains + EQ_TONE_BANDS, next.hidden);
+    } else if (count == EQ_TONE_BANDS) {
+        if (state.hiddenBands == EQ_TONE_BANDS) std::copy(state.hidden, state.hidden + EQ_TONE_BANDS, next.gains);
+        bool tuned = false;
+        for (int band = 0; band < state.bands; ++band) tuned |= state.gains[band] != 0;
+        if (tuned) {
+            next.hiddenBands = state.bands;
+            std::copy(state.gains, state.gains + EQ_MAX_BANDS, next.hidden);
+        }
+    } else {
+        EqualizerState moved = ResampleEqualizer(state, count);
+        std::copy(moved.gains, moved.gains + EQ_MAX_BANDS, next.gains);
+        next.hiddenBands = state.hiddenBands;
+        std::copy(state.hidden, state.hidden + EQ_MAX_BANDS, next.hidden);
+    }
+    state = next;
+}
+
 // Outputs are told apart by the GUID at the end of the endpoint id.
 std::wstring EndpointGuid(const std::wstring& id) {
     size_t dot = id.rfind(L'.');
     return dot == std::wstring::npos ? id : id.substr(dot + 1);
 }
 
-// Stored as "on;bands;gain,gain,...", or "on;gain,..." for 10 bands.
+// Reads "gain,gain,..." up to `end`.
+void ReadEqualizerGains(const wchar_t* at, const wchar_t* end, int* gains, int count) {
+    for (int band = 0; band < count && at && at < end && *at; ++band) {
+        wchar_t* next = nullptr;
+        gains[band] = ClampInt(static_cast<int>(wcstol(at, &next, 10)), -EQ_HARD_MAX, EQ_HARD_MAX);
+        at = next ? wcschr(next, L',') : nullptr;
+        if (at && at < end) {
+            ++at;
+        } else {
+            at = nullptr;
+        }
+    }
+}
+
+bool EqualizerBandCount(int count) {
+    for (const auto& layout : EQ_LAYOUTS) {
+        if (layout.count == count) return true;
+    }
+    return false;
+}
+
+// Stored as "on;bands;gain,gain,..." (or "on;gain,..." for 10 bands, the first format), and, when the layer that is
+// not shown has anything in it, ";bands;gain,gain,...".
 EqualizerState LoadEqualizerValue(const std::wstring& valueName) {
     EqualizerState state;
-    wchar_t buffer[512]{};
+    wchar_t buffer[768]{};
     Wh_GetStringValue(valueName.c_str(), buffer, ARRAYSIZE(buffer));
     buffer[ARRAYSIZE(buffer) - 1] = L'\0';
     if (!buffer[0]) return state;
@@ -7323,11 +7431,17 @@ EqualizerState LoadEqualizerValue(const std::wstring& valueName) {
         state.bands = EqLayoutFor(static_cast<int>(wcstol(list, nullptr, 10))).count;
         list = second + 1;
     }
-    for (int band = 0; band < state.bands && list && *list; ++band) {
-        state.gains[band] =
-            ClampInt(static_cast<int>(wcstol(list, nullptr, 10)), -EQ_HARD_MAX, EQ_HARD_MAX);
-        list = wcschr(list, L',');
-        if (list) ++list;
+    const wchar_t* tail = wcschr(list, L';');
+    ReadEqualizerGains(list, tail ? tail : list + wcslen(list), state.gains, state.bands);
+    state.hiddenBands = state.bands == EQ_TONE_BANDS ? 0 : EQ_TONE_BANDS;
+    if (tail) {
+        int hiddenBands = static_cast<int>(wcstol(tail + 1, nullptr, 10));
+        const wchar_t* hiddenList = wcschr(tail + 1, L';');
+        bool fits = state.bands == EQ_TONE_BANDS ? hiddenBands != EQ_TONE_BANDS : hiddenBands == EQ_TONE_BANDS;
+        if (hiddenList && fits && EqualizerBandCount(hiddenBands)) {
+            state.hiddenBands = hiddenBands;
+            ReadEqualizerGains(hiddenList + 1, hiddenList + 1 + wcslen(hiddenList + 1), state.hidden, hiddenBands);
+        }
     }
     return state;
 }
@@ -7335,11 +7449,7 @@ EqualizerState LoadEqualizerValue(const std::wstring& valueName) {
 // On, with at least one band moved.
 bool EqualizerActive(const std::wstring& valueName) {
     EqualizerState state = LoadEqualizerValue(valueName);
-    if (!state.on) return false;
-    for (int band = 0; band < state.bands; ++band) {
-        if (state.gains[band]) return true;
-    }
-    return false;
+    return state.on && EqualizerHasGain(state);
 }
 
 EqualizerState LoadEqualizer(const std::wstring& guid) {
@@ -7350,6 +7460,14 @@ std::wstring EqualizerValueText(const EqualizerState& state) {
     std::wstring value = (state.on ? L"1;" : L"0;") + std::to_wstring(state.bands);
     for (int band = 0; band < state.bands; ++band) {
         value += (band == 0 ? L";" : L",") + std::to_wstring(state.gains[band]);
+    }
+    bool kept = false;
+    for (int band = 0; band < state.hiddenBands; ++band) kept |= state.hidden[band] != 0;
+    if (kept) {
+        value += L";" + std::to_wstring(state.hiddenBands);
+        for (int band = 0; band < state.hiddenBands; ++band) {
+            value += (band == 0 ? L";" : L",") + std::to_wstring(state.hidden[band]);
+        }
     }
     return value;
 }
@@ -7442,7 +7560,9 @@ void SaveCustomEqPresets(const std::vector<EqPreset>& presets) {
 int MatchingEqPreset(const std::vector<EqPreset>& presets, const EqualizerState& state) {
     for (size_t i = 0; i < presets.size(); ++i) {
         EqualizerState curve = ResampleEqualizer(presets[i].curve, state.bands);
-        if (std::equal(curve.gains, curve.gains + state.bands, state.gains)) {
+        bool kept = false;
+        for (int band = 0; band < state.hiddenBands; ++band) kept |= state.hidden[band] != 0;
+        if (!kept && std::equal(curve.gains, curve.gains + state.bands, state.gains)) {
             return static_cast<int>(i);
         }
     }
@@ -8355,11 +8475,7 @@ bool FxNeeded(const FxSettings& settings) {
         DeviceMirrorActive(settings.mirror)) {
         return true;
     }
-    if (!settings.eq.on) return false;
-    for (int gain : settings.eq.gains) {
-        if (gain) return true;
-    }
-    return false;
+    return settings.eq.on && EqualizerHasGain(settings.eq);
 }
 
 SRWLOCK g_fxLock = SRWLOCK_INIT;
@@ -8416,11 +8532,7 @@ std::unordered_map<std::wstring, DeviceMirror> g_deviceMirror;  // By output GUI
 
 bool DeviceFxActive(const DeviceFx& fx) {
     if (fx.loudMax.on || DeviceGainActive(fx.gain)) return true;
-    if (!fx.eq.on) return false;
-    for (int gain : fx.eq.gains) {
-        if (gain) return true;
-    }
-    return false;
+    return fx.eq.on && EqualizerHasGain(fx.eq);
 }
 
 void PublishDeviceFx() {
@@ -8567,6 +8679,25 @@ void DesignBand(Biquad& filter, double rate, const EqLayout& layout, int band, d
     }
 }
 
+// The filters of an equalizer: Basic first, then its fine tuning. Returns how many have a gain.
+int DesignEqualizerFilters(Biquad* filters, const EqualizerState& eq, double rate) {
+    EqLayers layers = EqualizerLayers(eq);
+    int used = 0;
+    for (int slot = 0; slot < EQ_FILTERS; ++slot) {
+        bool tone = slot < EQ_TONE_BANDS;
+        int band = tone ? slot : slot - EQ_TONE_BANDS;
+        const EqLayout* layout = tone ? &EQ_LAYOUTS[0] : layers.detailBands ? &EqLayoutFor(layers.detailBands) : nullptr;
+        int value = tone ? layers.tone[band] : layers.detail[band];
+        if (eq.on && layout && band < layout->count && value != 0) {
+            DesignBand(filters[slot], rate, *layout, band, value / 10.0);
+            ++used;
+        } else {
+            filters[slot].active = false;
+        }
+    }
+    return used;
+}
+
 inline float RunBiquad(Biquad& filter, int channel, float x) {
     float y = filter.b0 * x + filter.z1[channel];
     filter.z1[channel] = filter.b1 * x - filter.a1 * y + filter.z2[channel];
@@ -8585,7 +8716,7 @@ inline float SoftLimit(float sample) {
 }
 
 struct FxChain {
-    Biquad bands[EQ_MAX_BANDS];
+    Biquad bands[EQ_FILTERS];
     float gain = 1.0f;
     // How far above full scale the stream may go: the output's own volume
     // turns the mix down after it, so with the speakers at 30% a boosted app
@@ -8628,21 +8759,9 @@ struct FxChain {
             delay.assign(wanted * 2, 0.0f);
             delayPosition = 0;
         }
-        int highest = 0;
-        const EqLayout& layout = EqLayoutFor(settings.eq.bands);
-        for (int band = 0; band < EQ_MAX_BANDS; ++band) {
-            bool used = settings.eq.on && band < layout.count;
-            int value = used ? settings.eq.gains[band] : 0;
-            if (used) {
-                DesignBand(bands[band], rate, layout, band, value / 10.0);
-            } else {
-                bands[band].active = false;
-            }
-            highest = std::max(highest, value);
-        }
+        DesignEqualizerFilters(bands, settings.eq, rate);
         // No preamp: a boosted band only makes that band louder. The soft
         // limiter (or LoudMax) catches the peaks.
-        (void)highest;
         preamp = 1.0f;
     }
 
@@ -8680,23 +8799,13 @@ struct FxChain {
     }
 
     // The output's own equalizer, when the mixer's engine does it.
-    Biquad deviceBands[EQ_MAX_BANDS];
+    Biquad deviceBands[EQ_FILTERS];
     bool deviceEq = false;
     float deviceGain = 1.0f;
 
     void ConfigureDevice(const EqualizerState& eq, const DeviceGain& gain, double rate) {
         deviceGain = DeviceGainActive(gain) ? static_cast<float>(std::pow(10.0, gain.tenths / 200.0)) : 1.0f;
-        const EqLayout& layout = EqLayoutFor(eq.bands);
-        deviceEq = false;
-        for (int band = 0; band < EQ_MAX_BANDS; ++band) {
-            bool used = eq.on && band < layout.count && eq.gains[band] != 0;
-            if (used) {
-                DesignBand(deviceBands[band], rate, layout, band, eq.gains[band] / 10.0);
-                deviceEq = true;
-            } else {
-                deviceBands[band].active = false;
-            }
-        }
+        deviceEq = DesignEqualizerFilters(deviceBands, eq, rate) > 0;
     }
 
     // Interleaved stereo. Without `limit`, LoudMax limits after this.
@@ -10292,12 +10401,11 @@ EqGeometry EqMeasure(int width) {
             y += Scale(176);
             }
         }
-        y = std::max(y, Scale(394));  // As tall as the equalizer.
     } else {
         at.toggle = {width - Scale(100), Scale(15), width - Scale(60), Scale(35)};
         at.presets = {Scale(12), y, width - Scale(12), y + Scale(40)};
         y += Scale(48);
-        at.strip = {Scale(12), y, Scale(12) + EQ_STRIP_LAYOUTS * Scale(EQ_SEGMENT), y + Scale(30)};
+        at.strip = {Scale(12), y, Scale(12) + (g_settings.advancedEqualizer ? EQ_STRIP_LAYOUTS : 0) * Scale(EQ_SEGMENT), y + Scale(30)};
         at.readout = {at.strip.right + Scale(8), y, width - Scale(16), y + Scale(30)};
         y += Scale(38);
         at.surface = {Scale(12), y, width - Scale(12), y + Scale(232)};
@@ -10493,7 +10601,7 @@ int EqControlAt(POINT point) {
     }
     if (PtInRect(&at.toggle, point)) return EQ_TOGGLE;
     if (PtInRect(&at.presets, point)) return EQ_PRESETS;
-    for (int i = 0; i < EQ_STRIP_LAYOUTS; ++i) {
+    for (int i = 0; i < (g_settings.advancedEqualizer ? EQ_STRIP_LAYOUTS : 0); ++i) {
         int left = at.strip.left + i * Scale(EQ_SEGMENT);
         RECT segment{left, at.strip.top, left + Scale(EQ_SEGMENT), at.strip.bottom};
         if (PtInRect(&segment, point)) return EQ_LAYOUT_FIRST + i;
@@ -10932,7 +11040,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
             labels[i] = texts[i].c_str();
             if (EQ_LAYOUTS[i].count == g_eq.state.bands) chosen = i;
         }
-        DrawEqSegments(dc, segments, EQ_STRIP_LAYOUTS, labels, chosen, g_eq.control,
+        if (g_settings.advancedEqualizer) DrawEqSegments(dc, segments, EQ_STRIP_LAYOUTS, labels, chosen, g_eq.control,
                        EQ_LAYOUT_FIRST, control);
         static constexpr PCWSTR toneNames[3] = {L"Bass", L"Mids", L"Treble"};
         std::wstring readout;
@@ -10941,12 +11049,18 @@ void DrawEqualizer(HDC dc, const RECT& client) {
                       EqFrequencyText(layout.frequencies[shown], true) + L"  ·  " +
                       EqGainText(g_eq.state.gains[shown]);
         }
+        const UINT align = (g_settings.advancedEqualizer ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
+        bool fineTuned = false;
+        for (int band = 0; band < g_eq.state.hiddenBands && g_eq.state.bands == EQ_TONE_BANDS; ++band) {
+            fineTuned |= g_eq.state.hidden[band] != 0;
+        }
         if (shown >= 0) {
-            DrawLabel(dc, readout, at.readout, g_bodyFont, g_theme.text,
-                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawLabel(dc, readout, at.readout, g_bodyFont, g_theme.text, align);
         } else {
-            DrawLabel(dc, L"Drag or scroll a band", at.readout, g_smallFont,
-                      g_theme.secondaryText, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawLabel(dc, !g_settings.advancedEqualizer && fineTuned
+                              ? L"A fine tuning from the advanced equalizer still applies"
+                              : L"Drag or scroll a band",
+                      at.readout, g_smallFont, g_theme.secondaryText, align);
         }
     }
 
@@ -11271,7 +11385,11 @@ void ShowEqPresetMenu(HWND owner) {
     MapWindowPoints(g_eq.window, owner, reinterpret_cast<POINT*>(&anchor), 2);
     int chosen = RunOutputList(owner, items, matching, L"", &anchor);
     if (chosen >= 0 && chosen < save) {
-        g_eq.state = ResampleEqualizer(presets[chosen].curve, g_eq.state.bands);
+        // The preset sounds as it is: the layer under the one shown is cleared.
+        EqualizerState curve = ResampleEqualizer(presets[chosen].curve, g_eq.state.bands);
+        std::copy(curve.gains, curve.gains + EQ_MAX_BANDS, g_eq.state.gains);
+        g_eq.state.hiddenBands = g_eq.state.bands == EQ_TONE_BANDS ? 0 : EQ_TONE_BANDS;
+        std::fill(g_eq.state.hidden, g_eq.state.hidden + EQ_MAX_BANDS, 0);
         g_eq.state.on = true;
         g_eq.dirty = true;
         ApplyEqualizer(true);
@@ -11495,9 +11613,11 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
     g_eq.loudMax = LoadLoudMax(EqLoudMaxKey());
     if (app.empty() && !sync) g_eq.gain = LoadDeviceGain(g_eq.guid);
     if (g_eq.state.bands > 15) {
-        g_eq.state = ResampleEqualizer(g_eq.state, 15);
+        SwitchEqualizerView(g_eq.state, 15);
         g_eq.dirty = true;
     }
+    // Without the advanced equalizer only Basic is shown; a fine tuning made before keeps playing underneath.
+    if (!g_settings.advancedEqualizer) SwitchEqualizerView(g_eq.state, EQ_TONE_BANDS);
     g_eq.effects = (startOnEffects || sync) && EqHasEffects();
 
     // Over the mixer, as wide as it.
@@ -11692,8 +11812,8 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                 } else if (control >= EQ_LAYOUT_FIRST) {
                     int count = EQ_LAYOUTS[control - EQ_LAYOUT_FIRST].count;
                     if (count != g_eq.state.bands) {
-                        // The curve so far carries over to the new bands.
-                        g_eq.state = ResampleEqualizer(g_eq.state, count);
+                        // The sound stays as it is: Basic is kept, the fine tuning adds to it.
+                        SwitchEqualizerView(g_eq.state, count);
                         g_eq.hover = g_eq.focus = -1;
                         g_eq.dirty = true;
                         PaintEqualizer();

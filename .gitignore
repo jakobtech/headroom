@@ -4,3 +4,4 @@ bin/
 tools/
 installer/Output/
 reference/
+tests/eqlayers_test.cpp

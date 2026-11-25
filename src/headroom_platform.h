@@ -403,6 +403,7 @@ inline PCWSTR DefaultString(const std::wstring& name) {
     if (name == L"backgroundEffect") return L"blur";
     if (name == L"visibleRows") return L"auto";
     if (name == L"loudMaxEnabled") return L"on";
+    if (name == L"advancedEqualizer") return L"off";
     return L"";
 }
 inline int DefaultInt(const std::wstring& name) {
