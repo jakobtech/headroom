@@ -11,6 +11,12 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## 2.1.0-alpha6
+- Start-up: when the settings file or the log cannot be read right after logging in (the disk or a virus scanner is still busy), Headroom waits for it, never writes over it, and loads the settings as soon as it can be read. Before, a session could start with everything at its default: no listened-to input, System sounds back in the list.
+- A listened-to input that could not be started (for example because it was not ready yet) is tried again after a few seconds.
+- A listened-to input that is not connected stays in the list.
+- The log (`%LOCALAPPDATA%\Headroom\log.txt`) says more: which rows the list shows, the hidden list, the level and output of a listened-to input. It opens again later if it could not be opened at start-up.
+
 ## 2.1.0-alpha5
 - Inputs: a line-in (or any input) can be listened to through Headroom. In the microphone tab, open the device list, right-click the input and choose *Listen through Headroom*. It then shows up in the playback list like an app, with its own volume, mute, output, equalizer, loudness equalization, LoudMax and gain.
 - Settings: an *Apply* button puts the changes into effect without closing the window.

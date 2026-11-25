@@ -27,7 +27,7 @@
 
 #define WH_MOD_ID L"headroom"
 #define WH_MOD_VERSION L"2.1.0-alpha1"
-#define HEADROOM_VERSION_TEXT L"2.1.0-alpha5"
+#define HEADROOM_VERSION_TEXT L"2.1.0-alpha6"
 
 namespace headroom {
 

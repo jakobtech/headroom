@@ -28,7 +28,7 @@ anything into the app.
 
 It is a single small program (under 1 MB, no installer, no framework) written in C++ with plain Win32.
 
-> **Status: `2.1.0-alpha5`, a test version.** It is used daily, but new parts such as the surround channels are
+> **Status: `2.1.0-alpha6`, a test version.** It is used daily, but new parts such as the surround channels are
 > young. Every released state is tagged, so you can always go back to an earlier one.
 > See [CHANGELOG.md](CHANGELOG.md).
 
