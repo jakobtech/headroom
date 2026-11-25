@@ -11,6 +11,9 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## 2.1.0-alpha7 (in progress)
+- Two outputs at once: in the Effects page of an output, *Also play on a second output* plays everything that plays on the output on another one as well, for example speakers and a headset. A slider sets the delay between the two (up to 1 s, finer near zero): to the right delays the second output, to the left the first one, so that two outputs that are late by different amounts (a Bluetooth headset) are heard together. The sound runs through the mixer's engine, so it needs VB-CABLE.
+
 ## 2.1.0-alpha6
 - Start-up: when the settings file or the log cannot be read right after logging in (the disk or a virus scanner is still busy), Headroom waits for it, never writes over it, and loads the settings as soon as it can be read. Before, a session could start with everything at its default: no listened-to input, System sounds back in the list.
 - A listened-to input that could not be started (for example because it was not ready yet) is tried again after a few seconds.
