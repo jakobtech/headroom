@@ -75,20 +75,17 @@ A click on a badge opens the matching panel.
 
 - **Windows 11, 64 bit.** (The per-app effects use Windows' application loopback, which exists from Windows 10
   build 20348.)
-- For **boost**, the **equalizer per app**, **LoudMax per app** and **loudness equalization**:
+- For **boost**, the **equalizer**, **gain** and **LoudMax** of apps and outputs, **loudness equalization**,
+  listening to an input and **playing on a second output**:
   [**VB-CABLE**](https://vb-audio.com/Cable/), a small free virtual audio output (donationware).
-- *Optional:* [**Equalizer APO**](https://sourceforge.net/projects/equalizerapo/) (free, open source) runs the
-  equalizer and LoudMax of an **output** without any delay. Without it, the mixer's own engine does the same
-  with about 40 ms of delay and leaves system sounds alone. A setting (*Output effects*) picks which one.
 - *Optional:* [**LoudMax**](https://loudmax.blogspot.com/) (free, by its author) for the limiter. Put
-  `LoudMax64.dll` into Equalizer APO's `VSTPlugins` folder (usually `C:\Program Files\EqualizerAPO\VSTPlugins`)
-  or set its path in the settings.
+  `LoudMax64.dll` into a VST folder (for example `C:\Program Files\VSTPlugins`) or set its path in the settings.
 
 The settings window has a **Setup guide** page with these steps and shows what it found on your PC. Use the
 official pages above only: other sites that offer the same downloads may add unwanted software.
 
-Headroom does not include or distribute VB-CABLE, Equalizer APO or LoudMax. You install them yourself from their
-own pages and follow their terms.
+Headroom does not include or distribute VB-CABLE or LoudMax. You install them yourself from their own pages and
+follow their terms.
 
 ## Quick start
 
@@ -137,20 +134,21 @@ alone. Combinations Windows and programs use themselves (Alt+F4, Alt+Tab, Ctrl+C
 
 The mixer never injects code into other programs and loads nothing into games. It only uses Windows' own audio
 interfaces: the audio session APIs, the per-app output setting that Windows Settings uses, and application
-loopback capture. Equalizer APO, if you use it, runs inside Windows' audio service, not inside a game.
+loopback capture.
 
 That is how it is designed to stay clear of anti-cheat systems. There is no guarantee for a specific one, so
 check the rules of the games you play.
 
 ## How the effects work
 
-For boost, an app's equalizer, LoudMax and loudness equalization, Windows routes the app to the silent VB-CABLE
+For boost, the equalizer, gain, LoudMax and loudness equalization, Windows routes the app to the silent VB-CABLE
 output. The mixer records just that app with application loopback, processes the sound and plays it on the output
 the app is meant for. Nothing is loaded into the app. If anything fails, the app is routed back at once; when
 the mixer exits, every app is routed back.
 
 Measured on one PC, this path adds about 40 ms compared with an app that plays directly. Apps without effects
-play directly and have no extra delay. An output's equalizer through Equalizer APO adds practically none.
+play directly and have no extra delay. The equalizer, gain and LoudMax of an output work the same way for every
+app that plays on it.
 
 ## FAQ
 
@@ -187,5 +185,5 @@ Copyright (c) Jakob Hüttner. MIT license, see [LICENSE](LICENSE).
 Parts of the code derive from the Windhawk mod "Better Volume Mixer" by
 [0Allu](https://github.com/0Allu/better-volume-mixer) (MIT, Copyright (c) 2026 Allu).
 
-Headroom is an independent project. It is not affiliated with VB-Audio, Equalizer APO, LoudMax or Windhawk, and
+Headroom is an independent project. It is not affiliated with VB-Audio, LoudMax or Windhawk, and
 it is not related to other programs that happen to be called Headroom.

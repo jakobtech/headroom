@@ -133,7 +133,6 @@ struct Option {
 constexpr Option kThemeOptions[] = {{L"system", L"Windows"}, {L"dark", L"Dark"}, {L"light", L"Light"}};
 constexpr Option kStyleOptions[] = {{L"windows11", L"Windows 11"}, {L"windows10", L"Windows 10"}};
 constexpr Option kEffectOptions[] = {{L"glass", L"Frosted"}, {L"blur", L"Blur"}, {L"none", L"None"}};
-constexpr Option kApoOptions[] = {{L"auto", L"On"}, {L"builtin", L"Off"}};
 constexpr Option kRowsOptions[] = {{L"auto", L"Fill"}, {L"5", L"5"},   {L"7", L"7"},
                                    {L"10", L"10"},     {L"15", L"15"}, {L"20", L"20"}};
 
@@ -173,7 +172,6 @@ PCWSTR SettingInfo(const std::wstring& name) {
         {L"showAllSessions", L"Shows every audio session separately per output, including unused ones, instead of one row per app. Most people leave this off."},
         {L"eqRangeCustom", L"Lets the equalizer bands of apps, outputs and inputs go beyond 12 dB. The most is set by the slider below. Bands you set higher stay as they are if you turn this off, but the faders then show them at the 12 dB end."},
         {L"eqRangeDb", L"The most an equalizer band can raise or lower, 12 to 60 dB, while the extended range is on. Large boosts add a lot of level and can distort: the limiter (the mixer's own, or LoudMax) catches the peaks. Keep the volume low when you try a high value."},
-        {L"deviceEffects", L"Equalizer APO is a free equalizer for the whole of Windows. On: the equalizer, gain and LoudMax of an output run in Equalizer APO when it is installed and set up for that output: no delay, and all sound, system sounds included. Off: Headroom's own engine does them, only for apps that run through Headroom, with about 40 ms delay. Equalizers of apps and inputs always use Headroom's engine."},
         {L"volumeStep", L"How many percent one step of the mouse wheel changes, over an app row, the master volume or the tray icon. 1 to 20; 5 is usual."},
     };
     for (const Entry& entry : entries) {
@@ -217,7 +215,7 @@ struct SettingsUi {
     int scroll[2] = {0, 0};  // The first row shown: 0 the apps, 1 the devices.
     int scrollDrag = -1, scrollGrab = 0;
     RECT cardInfo[4]{};
-    RECT guideCards[3]{}, guideButtons[3]{};
+    RECT guideCards[2]{}, guideButtons[2]{};
     std::vector<HiddenOutput> hiddenOutputs;
     std::vector<HiddenApp> hiddenApps;
     int otherHidden = 0;
@@ -399,7 +397,6 @@ void BuildItems() {
         toggle(L"Silent apps on every output", L"showIdleAppsOnAllOutputs"),
         toggle(L"Show all audio sessions", L"showAllSessions"),
         slider(L"Mouse-wheel step", L"volumeStep", 1, 20, L" %"),
-        segments(L"Equalizer APO", L"deviceEffects", kApoOptions, 2),
     };
     const int columnWidth = 410, rowHeight = 44, rowStep = 48, top = 76;
     for (int column = 0; column < 2; ++column) {
@@ -457,7 +454,7 @@ void BuildItems() {
     g_ui.height = Scale(y + 34 + 20);
     g_ui.tabs[0] = Box(660 - 20, 16, 100, 30);
     g_ui.tabs[1] = Box(660 + 80, 16, 140, 30);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         g_ui.guideCards[i] = Box(20, 76 + i * 200, 840, 190);
         g_ui.guideButtons[i] = Box(20 + 840 - 196, 76 + i * 200 + 14, 180, 32);
     }
@@ -586,7 +583,7 @@ int SliderValue(const Item& item, int x) {
 PCWSTR CardInfo(int card) {
     switch (card) {
         case 0:
-            return L"The full path to LoudMax64.dll, if the mixer does not find it on its own. Leave it empty to search Equalizer APO's VSTPlugins folder and the usual VST folders. Quotes are not needed.";
+            return L"The full path to LoudMax64.dll, if the mixer does not find it on its own. Leave it empty to search the usual VST folders. Quotes are not needed.";
         case 1:
             return L"A key combination that opens the mixer from anywhere, also while you play, at the bottom right of the monitor the mouse is on. Press it again to close the mixer. The tray icon only exists on the main monitor's taskbar, so this is the way to open the mixer on another monitor. Use a modifier (Ctrl, Alt or Shift) with a key, for example Ctrl+Alt+V.";
         case 99:
@@ -639,30 +636,22 @@ void PaintSettings(HWND window) {
 
     if (g_ui.page == 1) {
         struct Step { PCWSTR title; PCWSTR text; PCWSTR button; bool found; PCWSTR need; };
-        std::wstring apoFolder = EqualizerApoFolder();
-        Step steps[3] = {
-            {L"1.  Equalizer APO", L"For the equalizer and LoudMax on an output (speakers, headset).\n"
-             L"\u2022 Download the installer from the SourceForge page.\n"
-             L"\u2022 Run it. In the Configurator that opens, tick the playback devices to use.\n"
-             L"\u2022 Restart Windows.\n"
-             L"\u2022 Then open Equalizer on that output in the mixer (Ctrl+right-click the master volume).\n"
-             L"Free and open source.",
-             L"Open download page", !apoFolder.empty(), L"Needed for equalizer and LoudMax per output"},
-            {L"2.  VB-CABLE", L"For volume above 100%, and the equalizer, LoudMax and loudness equalization of single apps.\n"
+        Step steps[2] = {
+            {L"1.  VB-CABLE", L"For everything the mixer does with sound itself: volume above 100%, the equalizer, gain, LoudMax and "
+             L"loudness equalization of apps and outputs, listening to an input, and playing on a second output.\n"
              L"\u2022 Download the driver pack from the VB-Audio page and extract it.\n"
              L"\u2022 Run its setup program as administrator, then restart Windows.\n"
              L"\u2022 Nothing else to set up: the mixer routes an app through this silent virtual output only while it needs to.\n"
              L"Nothing is loaded into your games, so it is safe with anti-cheat. Donationware.",
-             L"Open VB-Audio page", !FindFxSink().empty(), L"Needed for per-app boost and effects"},
-            {L"3.  LoudMax (optional)", L"A free limiter that keeps loud peaks in check.\n"
+             L"Open VB-Audio page", !FindFxSink().empty(), L"Needed for boost and effects"},
+            {L"2.  LoudMax (optional)", L"A free limiter that keeps loud peaks in check.\n"
              L"\u2022 Download the VST2 package from the author's page and extract it.\n"
-             L"\u2022 Copy LoudMax64.dll into Equalizer APO's VSTPlugins folder "
-             L"(usually C:\\Program Files\\EqualizerAPO\\VSTPlugins).\n"
+             L"\u2022 Copy LoudMax64.dll into a VST folder, for example C:\\Program Files\\VSTPlugins.\n"
              L"\u2022 The mixer finds it by itself. If you keep it elsewhere, enter the path in Settings.\n"
              L"Use these official pages only: other sites that offer the same downloads may add unwanted software.",
              L"Open LoudMax page", !LoudMaxPath().empty(), L"Needed for the LoudMax limiter"},
         };
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
             const RECT& card = g_ui.guideCards[i];
             DrawSurface(dc, card, Radius(16), g_theme.panel);
             RECT head{card.left + Scale(16), card.top + Scale(12), card.right - Scale(216), card.top + Scale(40)};
@@ -746,7 +735,7 @@ void PaintSettings(HWND window) {
         }
     };
     card(1, g_ui.hotkeyCard, L"Open the mixer with a key", L"At the monitor where the mouse is. Click the field, then press the keys. Backspace clears it.");
-    card(0, g_ui.pathCard, L"LoudMax path", L"Full path to LoudMax64.dll. Empty: the mixer looks in Equalizer APO's folders.");
+    card(0, g_ui.pathCard, L"LoudMax path", L"Full path to LoudMax64.dll. Empty: the mixer looks in the usual VST folders.");
     card(2, g_ui.hiddenCard, L"Hidden apps", L"Never listed in the mixer");
     card(3, g_ui.outputsCard, L"Hidden devices", L"Left out of the device lists");
     // The boxes the text is typed into.
@@ -872,7 +861,7 @@ Hit HitTest(POINT point) {
         if (PtInRect(&g_ui.tabs[i], point)) hit.tab = i;
     }
     if (g_ui.page == 1) {
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
             if (PtInRect(&g_ui.guideButtons[i], point)) hit.button = 20 + i;
         }
         return hit;
@@ -1419,9 +1408,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
             } else if (hit.button == 5) {
                 AddHiddenApp();
             } else if (hit.button >= 20) {
-                static constexpr PCWSTR pages[3] = {L"https://sourceforge.net/projects/equalizerapo/",
-                                                    L"https://vb-audio.com/Cable/",
-                                                    L"https://loudmax.blogspot.com/"};
+                static constexpr PCWSTR pages[2] = {L"https://vb-audio.com/Cable/", L"https://loudmax.blogspot.com/"};
                 ShellExecuteW(hwnd, L"open", pages[hit.button - 20], nullptr, nullptr, SW_SHOWNORMAL);
             } else if (hit.button >= 10) {
                 size_t index = static_cast<size_t>(hit.button - 10);

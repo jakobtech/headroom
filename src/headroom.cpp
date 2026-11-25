@@ -69,7 +69,7 @@
   - "20": "20"
 - loudMaxPath: ""
   $name: LoudMax path
-  $description: Full path to LoudMax64.dll, for example C:\VST\LoudMax64.dll. Leave empty to look for it in Equalizer APO's folders and the usual VST folders.
+  $description: Full path to LoudMax64.dll, for example C:\VST\LoudMax64.dll. Leave empty to look for it in the usual VST folders.
 - switchCommunicationsDevice: true
   $name: Also switch the communications device
   $description: When you pick a playback device in the mixer, also make it the default communications device, like Windows Settings does. Calling apps such as Teams, Zoom or Discord then follow the switch. Turn off to keep the communications device unchanged.
@@ -267,7 +267,6 @@ struct Settings {
     bool exactVolumeEntry = false;
     std::vector<CustomApp> customApps;
     std::vector<std::wstring> hiddenApps;
-    std::wstring deviceEffects = L"auto";  // auto, apo or builtin: who runs an output's equalizer.
 };
 
 struct Theme {
@@ -790,13 +789,6 @@ void LoadSettings() {
         if (g_settings.loudMaxPath.size() >= 2 && g_settings.loudMaxPath.front() == L'"' &&
             g_settings.loudMaxPath.back() == L'"') {
             g_settings.loudMaxPath = g_settings.loudMaxPath.substr(1, g_settings.loudMaxPath.size() - 2);
-        }
-    }
-    {
-        WindhawkUtils::StringSetting deviceEffects = WindhawkUtils::StringSetting::make(L"deviceEffects");
-        g_settings.deviceEffects = deviceEffects.get();
-        if (g_settings.deviceEffects != L"apo" && g_settings.deviceEffects != L"builtin") {
-            g_settings.deviceEffects = L"auto";
         }
     }
     g_showOutputs = Wh_GetIntValue(SHOW_OUTPUTS_VALUE, 0) != 0;
@@ -7222,9 +7214,7 @@ void ShowOutputPicker(HWND window, const RECT* anchor = nullptr) {
 }
 
 // ---------------------------------------------------------------------------
-// Equalizer per output, through Equalizer APO. The mixer keeps the bands and
-// writes them as Headroom.txt into Equalizer APO's config folder;
-// Equalizer APO, which runs inside the Windows audio service, applies them.
+// Equalizer per output. The mixer keeps the bands, and its own audio engine applies them to what plays on the output.
 
 // Graphic equalizers as on hardware: 5 bands two octaves apart, 10 an octave
 // apart, 15 at 2/3 and 31 at 1/3 octave (ISO frequencies). The finer the
@@ -7262,7 +7252,6 @@ const EqLayout& EqLayoutFor(int count) {
     return EQ_LAYOUTS[2];  // 10 bands.
 }
 constexpr PCWSTR EQ_INDEX_VALUE = L"eqDevices_v1";
-constexpr PCWSTR EQ_FILE = L"Headroom.txt";
 
 struct EqualizerState {
     bool on = false;
@@ -7300,7 +7289,7 @@ EqualizerState ResampleEqualizer(const EqualizerState& from, int count) {
     return to;
 }
 
-// Equalizer APO tells outputs apart by the GUID at the end of the endpoint id.
+// Outputs are told apart by the GUID at the end of the endpoint id.
 std::wstring EndpointGuid(const std::wstring& id) {
     size_t dot = id.rfind(L'.');
     return dot == std::wstring::npos ? id : id.substr(dot + 1);
@@ -7485,87 +7474,62 @@ void AddEqualizerDevice(const std::wstring& guid) {
     }
 }
 
-// Equalizer APO's config folder, or empty when it is not installed.
-std::wstring EqualizerApoFolder() {
+// Earlier versions wrote the equalizers of outputs into the config folder of another program. That is gone, and what
+// was left there is taken out once, so that nothing is applied twice: the file of ours is deleted, and the line
+// that reads it is taken out of the configuration (the configuration from before stays in its backup).
+void RetireOldEqualizerFiles() {
+    if (Wh_GetIntValue(L"oldEqualizerFilesRetired_v1", 0)) return;
     wchar_t path[MAX_PATH]{};
     DWORD size = sizeof(path);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\EqualizerAPO", L"ConfigPath",
-                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, path, &size) !=
-            ERROR_SUCCESS ||
-        !path[0]) {
-        // Where the installer puts it by default.
-        if (!ExpandEnvironmentStringsW(L"%ProgramW6432%\\EqualizerAPO\\config", path,
-                                       ARRAYSIZE(path)) ||
-            GetFileAttributesW((std::wstring(path) + L"\\config.txt").c_str()) ==
-                INVALID_FILE_ATTRIBUTES) {
-            return {};
+    std::wstring folder;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\EqualizerAPO", L"ConfigPath", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     nullptr, path, &size) == ERROR_SUCCESS && path[0]) {
+        folder = path;
+    } else if (ExpandEnvironmentStringsW(L"%ProgramW6432%\\EqualizerAPO\\config", path, ARRAYSIZE(path))) {
+        folder = path;
+    }
+    bool done = true;
+    if (!folder.empty()) {
+        if (folder.back() != L'\\') folder += L'\\';
+        std::wstring config = folder + L"config.txt";
+        std::string content;
+        HANDLE file = CreateFileW(config.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            char buffer[4096];
+            DWORD read = 0;
+            while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read) content.append(buffer, read);
+            CloseHandle(file);
+        }
+        for (auto& c : content) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        bool ours = content.find("include: headroom.txt") != std::string::npos ||
+                    content.find("include: bettervolumemixer.txt") != std::string::npos;
+        if (ours) {
+            // A file without our line. The configuration from before stays where it was kept, for whoever wants it
+            // back: it can hold example filters that would change the sound.
+            HANDLE out = CreateFileW(config.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (out != INVALID_HANDLE_VALUE) {
+                const char text[] = "# Headroom no longer writes here. The configuration from before, if it was kept,\r\n"
+                                    "# is in config.before-headroom.txt.\r\n";
+                DWORD written = 0;
+                done = WriteFile(out, text, sizeof(text) - 1, &written, nullptr) != FALSE;
+                CloseHandle(out);
+            } else {
+                done = false;
+            }
+        }
+        if (done) {
+            DeleteFileW((folder + L"Headroom.txt").c_str());
+            DeleteFileW((folder + L"BetterVolumeMixer.txt").c_str());
         }
     }
-    std::wstring folder = path;
-    if (folder.back() != L'\\') folder += L'\\';
-    return folder;
-}
-
-bool WriteTextFile(const std::wstring& path, const std::string& text) {
-    std::wstring temporary = path + L".tmp";
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    bool ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) &&
-              written == text.size();
-    CloseHandle(file);
-    // Replaced in one step, so Equalizer APO never reads half a file.
-    ok = ok && MoveFileExW(temporary.c_str(), path.c_str(),
-                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    if (!ok) DeleteFileW(temporary.c_str());
-    return ok;
-}
-
-// Makes Equalizer APO read the mixer's file. Its own config.txt, which by
-// default holds example filters for every output, is kept as a backup.
-bool EnsureEqualizerInclude(const std::wstring& folder) {
-    std::wstring config = folder + L"config.txt";
-    std::string content;
-    HANDLE file = CreateFileW(config.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        char buffer[4096];
-        DWORD read = 0;
-        while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read) {
-            content.append(buffer, read);
-        }
-        CloseHandle(file);
-    }
-    std::string lower = content;
-    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (lower.find("headroom.txt") != std::string::npos) return true;
-    // Earlier versions went by another name: their files are taken over, the backup of the original
-    // configuration moves along, and the old filters are no longer read.
-    if (lower.find("bettervolumemixer.txt") != std::string::npos) {
-        MoveFileExW((folder + L"config.before-better-volume-mixer.txt").c_str(),
-                    (folder + L"config.before-headroom.txt").c_str(), 0);
-        DeleteFileW((folder + L"BetterVolumeMixer.txt").c_str());
-        return WriteTextFile(config,
-            "# Equalizer APO, managed by Headroom.\r\n"
-            "# The configuration from before is in config.before-headroom.txt.\r\n"
-            "Include: Headroom.txt\r\n");
-    }
-    if (!content.empty()) {
-        CopyFileW(config.c_str(), (folder + L"config.before-headroom.txt").c_str(),
-                  TRUE);
-    }
-    return WriteTextFile(config,
-        "# Equalizer APO, managed by Headroom.\r\n"
-        "# The configuration from before is in config.before-headroom.txt.\r\n"
-        "Include: Headroom.txt\r\n");
+    if (done) Wh_SetIntValue(L"oldEqualizerFilesRetired_v1", 1);
 }
 
 // ---------------------------------------------------------------------------
 // LoudMax, Thomas Mundt's free look-ahead limiter (a VST2 plugin), when it is
-// in Equalizer APO's VSTPlugins folder. For an output, Equalizer APO runs it
-// from a line in the mixer's file, as its own editor writes it. For an app,
-// the mixer's audio engine runs it itself, so it can be on for single apps.
+// in a VST folder or its path is set. The mixer's audio engine runs it itself,
+// for single apps and for outputs.
 
 struct LoudMaxState {
     bool on = false;
@@ -7609,49 +7573,8 @@ std::wstring FindFileBelow(const std::wstring& folder, PCWSTR name, int depth) {
     return found;
 }
 
-// The plugin named in Equalizer APO's own config.txt, when it is there.
-std::wstring LoudMaxFromConfig(const std::wstring& configFolder, const std::wstring& base) {
-    HANDLE file = CreateFileW((configFolder + L"config.txt").c_str(), GENERIC_READ,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return {};
-    std::string text;
-    char buffer[4096];
-    DWORD read = 0;
-    while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read) text.append(buffer, read);
-    CloseHandle(file);
-    std::string lower = text;
-    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    size_t at = lower.find("loudmax");
-    if (at == std::string::npos) return {};
-    size_t lineStart = lower.rfind('\n', at);
-    lineStart = lineStart == std::string::npos ? 0 : lineStart + 1;
-    size_t library = lower.find("library", lineStart);
-    if (library == std::string::npos || library > at) return {};
-    size_t start = text.find_first_not_of(" \t", library + 7);
-    if (start == std::string::npos) return {};
-    std::string path;
-    if (text[start] == '"') {
-        size_t end = text.find('"', start + 1);
-        path = text.substr(start + 1, end == std::string::npos ? std::string::npos : end - start - 1);
-    } else {
-        size_t end = text.find_first_of(" \t\r\n", start);
-        path = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-    }
-    int length = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    if (length <= 1) return {};
-    std::wstring wide(length - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), length);
-    if (wide.size() > 2 && (wide[1] == L':' || wide[0] == L'\\')) return FileExists(wide) ? wide : L"";
-    for (const std::wstring& folder : {base + L"VSTPlugins\\", configFolder, base}) {
-        if (FileExists(folder + wide)) return folder + wide;
-    }
-    return {};
-}
-
 // Where a LoudMax DLL is, or empty. The setting wins (with the other bitness
-// next to it); then the plugin Equalizer APO itself loads; then the usual
-// folders. Looked up again every few seconds.
+// next to it); then the usual VST folders. Looked up again every few seconds.
 std::wstring FindLoudMax(PCWSTR fileName) {
     struct Cached {
         std::wstring path;
@@ -7675,28 +7598,10 @@ std::wstring FindLoudMax(PCWSTR fileName) {
             entry.path = sibling;
         }
     } else {
-        std::wstring base;
-        std::wstring config = EqualizerApoFolder();  // ...\EqualizerAPO\config\.
-        if (config.size() > 1) {
-            std::wstring trimmed = config.substr(0, config.size() - 1);
-            size_t slash = trimmed.find_last_of(L'\\');
-            if (slash != std::wstring::npos) base = trimmed.substr(0, slash + 1);
-        }
         wchar_t programs[MAX_PATH]{}, common[MAX_PATH]{};
         ExpandEnvironmentStringsW(L"%ProgramW6432%\\", programs, MAX_PATH);
         ExpandEnvironmentStringsW(L"%CommonProgramW6432%\\", common, MAX_PATH);
-        if (base.empty()) base = std::wstring(programs) + L"EqualizerAPO\\";
-        if (config.empty()) config = base + L"config\\";
-        std::wstring named = LoudMaxFromConfig(config, base);
-        size_t slash = named.find_last_of(L'\\');
-        if (!named.empty() && _wcsicmp(named.c_str() + slash + 1, fileName) == 0) {
-            entry.path = named;
-        } else if (!named.empty()) {
-            std::wstring sibling = named.substr(0, slash + 1) + fileName;
-            if (FileExists(sibling)) entry.path = sibling;
-        }
         std::wstring folders[] = {
-            base + L"VSTPlugins\\", config, base,
             std::wstring(programs) + L"VSTPlugins\\",
             std::wstring(programs) + L"Steinberg\\VSTPlugins\\",
             std::wstring(common) + L"VST2\\",
@@ -7923,9 +7828,7 @@ struct LoudMaxInstance {
     }
 };
 
-// An output's equalizer and LoudMax run in Equalizer APO when it is installed
-// (no extra delay), and in the mixer's own engine when it is not, or when the
-// settings ask for that.
+// An output's equalizer, gain and LoudMax run in the mixer's own engine, for what plays through it.
 // The gain of an output: everything that plays on it is raised by up to 12 dB, for a device that is too quiet.
 // A limiter (the mixer's own, or LoudMax) catches the peaks, which would crackle otherwise.
 // Kept as "on;tenths of a decibel" under "devGain_v1:<output GUID>".
@@ -8000,77 +7903,12 @@ DeviceMirror LoadAppMirror(const std::wstring& exe) {
     return LoadMirrorValue(L"appMirror_v1:" + exe);
 }
 
-bool UseApoForDevices() {
-    if (g_settings.deviceEffects == L"builtin") return false;
-    return !EqualizerApoFolder().empty();
-}
-std::atomic<bool> g_deviceFxBuiltIn{false};
 void PublishDeviceFx();
 
-// Writes the bands of every output into the mixer's file.
-bool WriteEqualizerConfig() {
-    bool apo = UseApoForDevices();
+// Hands the effects of the outputs to the streams that play on them.
+bool ApplyDeviceEffects() {
     PublishDeviceFx();
-    std::wstring folder = EqualizerApoFolder();
-    if (folder.empty()) return !apo;
-    // With the mixer's own engine, an earlier file of ours is emptied, so nothing is applied twice.
-    if (!apo && GetFileAttributesW((folder + EQ_FILE).c_str()) == INVALID_FILE_ATTRIBUTES) return true;
-    if (!EnsureEqualizerInclude(folder)) return false;
-    std::string text = "# Written by Headroom. Changes here are overwritten.\r\n";
-    bool loudMax = LoudMaxForOutputs();
-    for (const std::wstring& guid : EqualizerDevices()) {
-        if (!apo) break;
-        EqualizerState state = LoadEqualizer(guid);
-        LoudMaxState limiter = LoadLoudMax(L"dev:" + guid);
-        bool limit = loudMax && limiter.on;
-        DeviceGain boost = LoadDeviceGain(guid);
-        bool boosted = DeviceGainActive(boost);
-        if (!state.on && !limit && !boosted) continue;
-        if (!state.on) state = EqualizerState();
-        int highest = 0;
-        for (int gain : state.gains) highest = std::max(highest, gain);
-        char line[160];
-        int length = WideCharToMultiByte(CP_UTF8, 0, guid.c_str(), -1, line, sizeof(line),
-                                         nullptr, nullptr);
-        if (length <= 1) continue;
-        text += std::string("Device: ") + line + "\r\n";
-        // Without a limiter after it, Equalizer APO would clip the boosts, so it
-        // gets headroom; with LoudMax limiting, the bands simply add.
-        snprintf(line, sizeof(line), "Preamp: %.1f dB\r\n", (boosted ? boost.tenths / 10.0 : 0.0) + (limit ? 0.0 : -highest / 10.0));
-        text += line;
-        const EqLayout& layout = EqLayoutFor(state.bands);
-        for (int band = 0; band < layout.count; ++band) {
-            if (!state.gains[band]) continue;
-            PCSTR type = !layout.tone ? "PK" : band == 0 ? "LSC"
-                       : band == layout.count - 1 ? "HSC" : "PK";
-            double q = layout.tone && band != 0 && band != layout.count - 1 ? 0.7 : layout.q;
-            snprintf(line, sizeof(line), "Filter: ON %s Fc %g Hz Gain %.1f dB Q %.2f\r\n", type,
-                     layout.frequencies[band], state.gains[band] / 10.0, q);
-            text += line;
-        }
-        if (limit) {
-            // As Equalizer APO's editor writes it, from its VSTPlugins folder.
-            std::string plugin = "VSTPlugin: Library \"";
-            std::wstring path = LoudMaxOutputPath();
-            int size = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string narrow(size > 1 ? size - 1 : 0, '\0');
-            if (size > 1) {
-                WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, narrow.data(), size, nullptr,
-                                    nullptr);
-            }
-            plugin += narrow + "\"";
-            for (const auto& [name, value] : limiter.params) {
-                if (name == "Large GUI") continue;
-                bool spaced = name.find(' ') != std::string::npos;
-                snprintf(line, sizeof(line), " %s%s%s %g", spaced ? "\"" : "", name.c_str(),
-                         spaced ? "\"" : "", value);
-                plugin += line;
-            }
-            text += plugin + "\r\n";
-        }
-    }
-    text += "Device: all\r\n";
-    return WriteTextFile(folder + EQ_FILE, text);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -8574,15 +8412,13 @@ bool DeviceFxActive(const DeviceFx& fx) {
 }
 
 void PublishDeviceFx() {
-    bool builtIn = !UseApoForDevices();
-    g_deviceFxBuiltIn = builtIn;
     std::unordered_map<std::wstring, DeviceFx> next;
     std::unordered_map<std::wstring, DeviceMirror> nextMirror;
     for (const std::wstring& guid : EqualizerDevices()) {
         DeviceMirror mirror = LoadDeviceMirror(guid);
         if (DeviceMirrorActive(mirror)) nextMirror[guid] = std::move(mirror);
     }
-    if (builtIn) {
+    {
         for (const std::wstring& guid : EqualizerDevices()) {
             DeviceFx fx;
             fx.eq = LoadEqualizer(guid);
@@ -8627,7 +8463,7 @@ bool MirrorNeededFor(const std::wstring& guid) {
 }
 
 bool DeviceFxNeededFor(const std::wstring& guid) {
-    return g_deviceFxBuiltIn && DeviceFxActive(ReadDeviceFx(guid));
+    return DeviceFxActive(ReadDeviceFx(guid));
 }
 
 void SetFxTarget(const std::wstring& exe, const std::wstring& target) {
@@ -8743,7 +8579,7 @@ struct FxChain {
     // turns the mix down after it, so with the speakers at 30% a boosted app
     // has room to be louder before anything clips.
     float ceiling = 1.0f;
-    float preamp = 1.0f;  // Headroom for boosted bands, like Equalizer APO's preamp.
+    float preamp = 1.0f;  // Headroom for boosted bands, like a preamp.
 
     // Loudness equalization: a slow level follower that steers a gain
     // towards a target level, quickly down and, by the release time, up.
@@ -9286,7 +9122,7 @@ DWORD WINAPI FxStreamThread(void* parameter) {
 
     // The effects of the output this stream plays on, picked up when the output or the settings change.
     auto refreshDevice = [&]() {
-        deviceFx = g_deviceFxBuiltIn && !render.deviceId.empty()
+        deviceFx = !render.deviceId.empty()
                        ? ReadDeviceFx(EndpointGuid(render.deviceId)) : DeviceFx{};
         chain.ConfigureDevice(deviceFx.eq, deviceFx.gain, rate);
         deviceStage = DeviceFxActive(deviceFx);
@@ -9758,6 +9594,7 @@ void UpdateFx(HWND window) {
     static bool devicePublished = false;
     if (!devicePublished) {
         devicePublished = true;
+        RetireOldEqualizerFiles();
         PublishDeviceFx();
     }
     g_fxSinkId = FindFxSink();
@@ -9944,7 +9781,7 @@ HRESULT RouteApps(IAudioPolicyConfigFactory* config, const std::vector<DWORD>& p
 }
 
 // LoudMax's own window, to set it up for an app or an output. Its settings
-// go to the app's streams, or into Equalizer APO's file, while they change.
+// go to the app's streams while they change.
 struct LoudMaxEditor {
     HWND window = nullptr;
     HWND host = nullptr;  // The child window the plugin draws into.
@@ -9980,7 +9817,7 @@ void SaveLoudMaxEditor(bool now) {
         FxSettingsChanged(editor.app);
     } else {
         AddEqualizerDevice(editor.key.substr(4));
-        WriteEqualizerConfig();
+        ApplyDeviceEffects();
     }
 }
 
@@ -10089,7 +9926,7 @@ void OpenLoudMaxEditor(HWND owner, const std::wstring& key, const std::wstring& 
     }
     VstEffect* effect = CreateLoudMax(48000.0);
     if (!effect) {
-        MessageBoxW(owner, L"LoudMax could not be loaded from Equalizer APO's VSTPlugins folder.",
+        MessageBoxW(owner, L"LoudMax could not be loaded. Check its path in the settings.",
                     L"Headroom", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -10263,7 +10100,7 @@ void DrawInfoMark(HDC dc, const RECT& rect, bool hot) {
 struct EqualizerPanel {
     HWND window = nullptr;
     std::wstring app;       // An app's executable name, for its own equalizer.
-    std::wstring guid;      // Or an output, through Equalizer APO.
+    std::wstring guid;      // Or an output.
     std::wstring subtitle;  // What the equalizer belongs to.
     EqualizerState state;
     bool effects = false;   // The effects page (LoudMax, loudness) instead of the bands.
@@ -10509,8 +10346,8 @@ const wchar_t* EqInfoText(int control) {
     }
     if (control == EQ_INFO_GAIN) {
         return L"Raises everything that plays on this output, by up to 12 dB, for a device that is too "
-               L"quiet. With Equalizer APO it works for all sound, system sounds included. With the mixer's own "
-               L"engine it works for apps that run through the mixer. Sound above full scale would crackle, so "
+               L"quiet. It works for apps that run through the mixer's engine (it needs VB-CABLE). Sound above "
+               L"full scale would crackle, so "
                L"a limiter catches the peaks: the mixer's own soft limiter, or LoudMax when it is on. Above about "
                L"+6 dB loud sounds start to sound squashed. The volumes in Windows and in the app still decide the "
                L"final loudness: try it quietly first.";
@@ -10832,7 +10669,7 @@ void SetGainFromPoint(POINT point, bool now) {
             FxSettingsChanged(g_eq.app);
         } else {
             AddEqualizerDevice(g_eq.guid);
-            g_eq.failed = !WriteEqualizerConfig();
+            g_eq.failed = !ApplyDeviceEffects();
         }
     }
     PaintEqualizer();
@@ -10845,7 +10682,7 @@ void StoreMirror(const std::wstring& key, const std::wstring& app, const std::ws
         FxSettingsChanged(app);
     } else {
         AddEqualizerDevice(guid);
-        WriteEqualizerConfig();
+        ApplyDeviceEffects();
     }
 }
 
@@ -11209,7 +11046,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         ThumbState thumb = g_eq.gainDrag ? ThumbState::Pressed
                            : g_eq.control == EQ_GAIN_SLIDER ? ThumbState::Hover : ThumbState::Rest;
         DrawEqHSlider(dc, g, left, right, y, position, thumb, g_eq.gain.on);
-        bool limiter = g_eq.input || !UseApoForDevices() || (g_eq.loudMaxShown && g_eq.loudMaxUsable && g_eq.loudMax.on);
+        bool limiter = true;  // The mixer's own soft limiter is always behind it.
         PCWSTR note = !g_eq.gain.on ? L"Raises the volume of an output that is too quiet."
                     : !limiter && g_eq.gain.tenths >= 30
                         ? L"No limiter: loud sounds can crackle. Turn LoudMax on above."
@@ -11332,13 +11169,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         }
     }
 
-    DrawLabel(dc, g_eq.failed
-                  ? L"Could not write to Equalizer APO's config folder."
-                  : !g_eq.app.empty()
-                  ? L"Played through the mixer, about 40 ms later."
-                  : UseApoForDevices()
-                  ? L"Works on outputs enabled in Equalizer APO."
-                  : L"Played through the mixer's own engine, about 40 ms later.",
+    DrawLabel(dc, L"Played through the mixer's own engine, about 40 ms later.",
               at.footer, g_smallFont, g_eq.failed ? g_theme.accent : g_theme.secondaryText,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
@@ -11365,7 +11196,7 @@ void ApplyEqualizer(bool now) {
         return;
     }
     SaveEqualizer(g_eq.guid, g_eq.state);
-    bool failed = !WriteEqualizerConfig();
+    bool failed = !ApplyDeviceEffects();
     if (failed != g_eq.failed) {
         g_eq.failed = failed;
         PaintEqualizer();
@@ -11608,13 +11439,10 @@ struct SyncRequest {
 void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& deviceName,
                   const std::wstring& app = L"", bool startOnEffects = false, const SyncRequest* sync = nullptr) {
     if (g_eq.window || g_outputMenuOpen || (!sync && deviceId.empty() && app.empty())) return;
-    if (!sync && app.empty() && EqualizerApoFolder().empty() && FindFxSink().empty()) {
+    if (!sync && app.empty() && FindFxSink().empty()) {
         MessageBoxW(owner,
-                L"The equalizer of an output needs one of two things:\n\n"
-                L"\u2022 Equalizer APO, a small free and open-source audio filter (no delay), or\n"
-                L"\u2022 VB-CABLE, a small free virtual output, so the mixer's own engine does it "
-                L"(about 40 ms delay).\n\n"
-                L"The settings have a Setup guide with both.",
+                L"The equalizer of an output needs VB-CABLE, a small free virtual output: the mixer's own engine "
+                L"does it (about 40 ms delay).\n\nThe settings have a Setup guide.",
                 L"Headroom", MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -11776,7 +11604,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                         FxSettingsChanged(g_eq.app);
                     } else {
                         AddEqualizerDevice(g_eq.guid);
-                        g_eq.failed = !WriteEqualizerConfig();
+                        g_eq.failed = !ApplyDeviceEffects();
                     }
                     PaintEqualizer();
                 } else if (control == EQ_LM_SETTINGS) {
@@ -11818,7 +11646,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                         FxSettingsChanged(g_eq.app);
                     } else {
                         AddEqualizerDevice(g_eq.guid);
-                        g_eq.failed = !WriteEqualizerConfig();
+                        g_eq.failed = !ApplyDeviceEffects();
                     }
                     PaintEqualizer();
                 } else if (control == EQ_GAIN_SLIDER) {
@@ -12114,7 +11942,7 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
     CancelNameTooltip(window);
     SelectRow(DRAG_MASTER);
     std::vector<OutputDevice> items;
-    int mirrorIndex = -1, syncIndex = -1;
+    int mirrorIndex = -1;
     SyncRequest request;
     items.push_back({L"", L"Output device", L"\uE7F5", false});
     if (g_flow == eRender) {
@@ -12124,7 +11952,7 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
         request.guid = EndpointGuid(request.first);
         request.key = L"devMirror_v1:" + request.guid;
         request.name = g_endpointName;
-        static const wchar_t mirrorGlyph[] = {0xE7F5, 0}, syncGlyph[] = {0xE916, 0};
+        static const wchar_t mirrorGlyph[] = {0xE7F5, 0};
         mirrorIndex = static_cast<int>(items.size());
         items.push_back({L"", MirrorMenuLabel(request.key), mirrorGlyph, request.first.empty()});
     }
@@ -12150,10 +11978,6 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
     }
     if (chosen >= 0 && chosen == mirrorIndex) {
         ChooseMirror(window, request, screenPoint);
-        return;
-    }
-    if (chosen >= 0 && chosen == syncIndex) {
-        OpenSyncPage(window, request);
         return;
     }
     if (chosen == startIndex) {
@@ -12472,7 +12296,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
 
     // System sounds and sessions without a process cannot be routed.
     enum MenuItem { OUTPUT, RENAME, COPY, HIDE, HIDE_PERMANENTLY, MAKE_DEFAULT, MOVE_ALL_APPS,
-                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL, STOPLISTEN, LISTEN, MIRROR, SYNC };
+                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL, STOPLISTEN, LISTEN, MIRROR };
     const std::wstring executablePath = (*g_apps)[row].executablePath;
     const bool systemSoundsRow = (*g_apps)[row].systemSounds;
     const bool boosted = BoostUnlocked(executablePath);
@@ -12522,7 +12346,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
     if (!device && g_flow == eRender) add(EFFECTS, L"Effects", L"\uE9D9", executablePath.empty());
     // Also played on a second output: of an output, or of an app (and its output, whatever that is).
     SyncRequest mirrorRequest;
-    static const wchar_t mirrorGlyph[] = {0xE7F5, 0}, syncGlyph[] = {0xE916, 0};
+    static const wchar_t mirrorGlyph[] = {0xE7F5, 0};
     const bool canMirror = g_flow == eRender && (device ? !deviceId.empty() : routable && !executablePath.empty());
     if (canMirror) {
         if (device) {
@@ -12666,17 +12490,13 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         return;
     }
 
-    if (command == MIRROR || command == SYNC) {
+    if (command == MIRROR) {
         if (!device) {
             DWORD pid = (*g_apps)[row].processId ? (*g_apps)[row].processId
                         : (*g_apps)[row].processIds.empty() ? 0 : (*g_apps)[row].processIds.front();
             mirrorRequest.first = AppFirstOutputId(pid, mirrorRequest.app);
         }
-        if (command == MIRROR) {
-            ChooseMirror(window, mirrorRequest, screenPoint);
-        } else {
-            OpenSyncPage(window, mirrorRequest);
-        }
+        ChooseMirror(window, mirrorRequest, screenPoint);
         return;
     }
 
@@ -12973,7 +12793,7 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam,
             StopDefaultVolumeNotifications();
             LoadSettings();
             RegisterOpenHotkey(hWnd);
-            WriteEqualizerConfig();  // Who runs the outputs' effects may have changed.
+            ApplyDeviceEffects();
             CreateFonts(hWnd);  // The visual style selects the font families.
             if (!g_settings.moveNotifications) {
                 ReturnNotifications();
