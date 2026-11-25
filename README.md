@@ -4,13 +4,15 @@
 
 <p align="center">
 A small volume mixer for the Windows tray.<br>
-Per-app volume and output, boost up to 500 %, equalizer, limiter, loudness equalization, microphone tab.
+Per-app volume and output, boost up to 500 %, equalizer, limiter, loudness equalization, microphone tab,<br>
+and sound on <b>two outputs at once</b>.
 </p>
 
 <p align="center">
 <a href="CHANGELOG.md">Changelog</a> ·
 <a href="#quick-start">Quick start</a> ·
 <a href="#using-it">Using it</a> ·
+<a href="#two-outputs-at-once">Two outputs at once</a> ·
 <a href="#anti-cheat">Anti-cheat</a> ·
 <a href="#faq">FAQ</a>
 </p>
@@ -39,10 +41,10 @@ It is a single small program (under 1 MB, no installer, no framework) written in
 | **Volume** | Master and per-app volume, mute, mouse wheel, exact entry, keyboard control, pinned apps |
 | **Output per app** | Send any app to any output (the per-app output Windows Settings uses), or move all apps at once |
 | **Boost** | Unlock single apps up to **500 %** |
-| **Equalizer** | Per app and per output. Bass/Mids/Treble or 5, 10, 15 bands, presets, your own presets |
+| **Two outputs at once** | Hear the same sound on **speakers and a headset** at the same time: any output or app can also play on a second output, and a test sound helps you line the two up (see [below](#two-outputs-at-once)) |
+| **Equalizer** | Per app and per output. Bass/Mids/Treble, and with *Advanced equalizer* on also 5, 10 or 15 bands for fine tuning on top, without the sound changing when you switch. Presets and your own presets |
 | **LoudMax** | Limiter per app and per output (optional, free plugin) |
 | **Gain per output** | Raise a quiet output by up to 12 dB, with a limiter behind it |
-| **Two outputs at once** | Play an output or an app on a second output as well (speakers and a headset), with a test sound to line the two up |
 | **Loudness equalization** | Per app, six speeds from *Comp* (made for games) to *Long*, an expert mode and your own saved settings |
 | **Surround channels** | For games that play 5.1/7.1: a volume for each channel (front, center, back, sides, bass), for example to hear footsteps better |
 | **Microphone tab** | Default microphone with volume and mute, every input, and the apps that record right now |
@@ -108,9 +110,9 @@ file. Settings live in `%APPDATA%\Headroom\settings.cfg`, the log in
 | Middle-click the tray icon | Mute the master volume |
 | Scroll over the tray icon | Change the master volume |
 | Right-click an app | Pick the output for that app |
-| Ctrl + right-click an app | Menu: output, rename, volume at startup, unlock up to 500 %, **Equalizer**, **Effects**, mute hotkey, copy process name, hide |
+| Ctrl + right-click an app | Menu: output, rename, volume at startup, unlock up to 500 %, **Equalizer**, **Effects**, **Also play on another output**, mute hotkey, copy process name, hide |
 | Right-click the master volume | Pick the playback device (also sets the communications device) |
-| Ctrl + right-click the master volume | Output, volume at startup, **Equalizer**, **Effects** for the default output |
+| Ctrl + right-click the master volume | Output, volume at startup, **Equalizer**, **Effects**, **Also play on another output** for the default output |
 | Microphone button in the header | Switch the mixer to the microphone tab (and back) |
 | Menu button in the header | List every device with its own volume |
 | Ctrl + right-click a device in a list | Hide that device. Bring it back from the tray menu or in the settings |
@@ -119,8 +121,10 @@ file. Settings live in `%APPDATA%\Headroom\settings.cfg`, the log in
 **Effects** is its own page: the LoudMax switch (its original window in a frame that matches the mixer) and
 loudness equalization. Hover the small (i) next to a setting for a short explanation.
 
-**Equalizer:** drag a band, scroll over it, or right-click it to reset it. Choose *Basic* (bass, mids, treble) or
-5, 10 or 15 bands; the curve carries over when you switch.
+**Equalizer:** drag a band, scroll over it, or right-click it to reset it. It starts with *Basic* (bass, mids,
+treble). Turn on *Advanced equalizer* in the settings to also choose 5, 10 or 15 bands. Switching does not change
+the sound: the faders of the new layout show your Basic curve, and what you move on top is a fine tuning that adds
+to it. Back on Basic, your Basic is as you left it.
 
 **Loudness equalization** turns loud sounds down and quiet ones up. *Comp* is made for games: footsteps come
 up, shots and explosions are cut within milliseconds, and the output queue is the shortest. *Custom* starts from
@@ -129,6 +133,26 @@ any ready-made speed, has eight values and can be saved under a name for other a
 **Mute hotkeys:** Ctrl + right-click an app, *Set mute hotkey*, press the keys. Esc cancels, Del removes it.
 Letters and digits need Ctrl, Alt or Win; F1 to F11, F13 to F24, Pause, Scroll Lock and the media keys also work
 alone. Combinations Windows and programs use themselves (Alt+F4, Alt+Tab, Ctrl+C and the like) are refused.
+
+## Two outputs at once
+
+Play what you hear on **two outputs at the same time**, for example your speakers and your headset, or a headset
+and a second headset.
+
+1. Ctrl + right-click the **master volume** (for everything that plays on the default output), an **output row**,
+   an **app**, or a **listened-to input**, and choose **Also play on another output**.
+2. Pick the second output from the list. *Not on a second output* turns it off again.
+3. A **sync page** opens. Two outputs are rarely equally late: a Bluetooth or wireless headset can be 100 to 200 ms
+   behind speakers, so the sound would be heard twice, one after the other. Press **Play a test sound**: the first
+   output plays a soft low tap and the second a higher one, every second. Move the slider (or use the -10, -1,
+   +1 and +10 ms steps, or the arrow keys) until the two taps are heard as one. To the right delays the second output, to
+   the left the first, up to one second each way. If the high tap comes first, move right; if the low one comes first,
+   move left.
+
+The delay stays the same from one start to the next, so you set it once. An app can have its own second output; it
+wins over the one of the output it plays on. It needs **VB-CABLE** and adds about 40 ms to both outputs, because the sound runs
+through Headroom's engine. *Sync the two outputs* is at the end of the same list when a second output is set, to line
+them up again later, for example for another headset.
 
 ## Anti-cheat
 
