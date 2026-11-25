@@ -8698,6 +8698,161 @@ int DesignEqualizerFilters(Biquad* filters, const EqualizerState& eq, double rat
     return used;
 }
 
+// How much one band of a layout raises or lowers a frequency, in dB, at 48 kHz.
+double BandResponseDb(const EqLayout& layout, int band, double gainDb, double frequency) {
+    Biquad filter;
+    DesignBand(filter, 48000.0, layout, band, gainDb);
+    if (!filter.active) return 0.0;
+    const double pi = 3.14159265358979323846;
+    double w = 2.0 * pi * frequency / 48000.0;
+    double c1 = std::cos(w), s1 = std::sin(w), c2 = std::cos(2 * w), s2 = std::sin(2 * w);
+    double nr = filter.b0 + filter.b1 * c1 + filter.b2 * c2;
+    double ni = -(filter.b1 * s1 + filter.b2 * s2);
+    double dr = 1.0 + filter.a1 * c1 + filter.a2 * c2;
+    double di = -(filter.a1 * s1 + filter.a2 * s2);
+    return 10.0 * std::log10((nr * nr + ni * ni) / (dr * dr + di * di));
+}
+
+// The gains (tenths of a decibel) of the bands of a layout that come closest to the curve of `from`, from 25 Hz to
+// 16 kHz (the shelves of Basic go on beyond the outer bands, which peaks cannot follow). The curve of an equalizer is the sum of its bands' curves in dB, each of which depends on its own gain only.
+// Damped least squares (Levenberg-Marquardt) finds the best gains; they are rounded to tenths of a decibel and each
+// band is tried one step up and down while the curve gets closer. The more bands, the closer.
+constexpr int EQ_FIT_POINTS = 160;
+
+// Solves a x = b (n by n) in place, by Gaussian elimination with the largest pivot.
+void SolveLinear(std::vector<double>& a, std::vector<double>& b, int n) {
+    for (int column = 0; column < n; ++column) {
+        int pivot = column;
+        for (int row = column + 1; row < n; ++row) {
+            if (std::fabs(a[static_cast<size_t>(row) * n + column]) > std::fabs(a[static_cast<size_t>(pivot) * n + column])) pivot = row;
+        }
+        if (pivot != column) {
+            for (int k = 0; k < n; ++k) std::swap(a[static_cast<size_t>(column) * n + k], a[static_cast<size_t>(pivot) * n + k]);
+            std::swap(b[column], b[pivot]);
+        }
+        double diagonal = a[static_cast<size_t>(column) * n + column];
+        if (std::fabs(diagonal) < 1e-12) continue;
+        for (int row = column + 1; row < n; ++row) {
+            double factor = a[static_cast<size_t>(row) * n + column] / diagonal;
+            for (int k = column; k < n; ++k) a[static_cast<size_t>(row) * n + k] -= factor * a[static_cast<size_t>(column) * n + k];
+            b[row] -= factor * b[column];
+        }
+    }
+    for (int row = n - 1; row >= 0; --row) {
+        double sum = b[row];
+        for (int k = row + 1; k < n; ++k) sum -= a[static_cast<size_t>(row) * n + k] * b[k];
+        double diagonal = a[static_cast<size_t>(row) * n + row];
+        b[row] = std::fabs(diagonal) < 1e-12 ? 0.0 : sum / diagonal;
+    }
+}
+
+void FitEqualizerGains(const EqualizerState& from, int count, int* gains) {
+    const EqLayout& source = EqLayoutFor(from.bands);
+    const EqLayout& layout = EqLayoutFor(count);
+    const int n = layout.count;
+    const size_t stride = static_cast<size_t>(n);
+    double frequency[EQ_FIT_POINTS], target[EQ_FIT_POINTS];
+    for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+        frequency[p] = 25.0 * std::pow(640.0, p / static_cast<double>(EQ_FIT_POINTS - 1));
+        double sum = 0.0;
+        for (int band = 0; band < source.count; ++band) {
+            sum += BandResponseDb(source, band, from.gains[band] / 10.0, frequency[p]);
+        }
+        target[p] = sum;
+    }
+    auto squaredError = [&](const double* dB) {
+        double error = 0.0;
+        for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+            double sum = 0.0;
+            for (int i = 0; i < n; ++i) sum += BandResponseDb(layout, i, dB[i], frequency[p]);
+            error += (target[p] - sum) * (target[p] - sum);
+        }
+        return error;
+    };
+    double g[EQ_MAX_BANDS] = {};
+    double current = squaredError(g), lambda = 0.01;
+    for (int round = 0; round < 40 && current > 1e-6; ++round) {
+        std::vector<double> residual(EQ_FIT_POINTS), jacobian(EQ_FIT_POINTS * stride);
+        for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+            double sum = 0.0;
+            for (int i = 0; i < n; ++i) {
+                sum += BandResponseDb(layout, i, g[i], frequency[p]);
+                jacobian[p * stride + i] = (BandResponseDb(layout, i, g[i] + 0.25, frequency[p]) -
+                                            BandResponseDb(layout, i, g[i] - 0.25, frequency[p])) / 0.5;
+            }
+            residual[p] = target[p] - sum;
+        }
+        std::vector<double> normal(stride * stride), gradient(n);
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                double sum = 0.0;
+                for (int p = 0; p < EQ_FIT_POINTS; ++p) sum += jacobian[p * stride + i] * jacobian[p * stride + j];
+                normal[i * stride + j] = sum;
+            }
+            double sum = 0.0;
+            for (int p = 0; p < EQ_FIT_POINTS; ++p) sum += jacobian[p * stride + i] * residual[p];
+            gradient[i] = sum;
+        }
+        bool better = false;
+        for (int attempt = 0; attempt < 8 && !better; ++attempt) {
+            std::vector<double> a = normal, step = gradient;
+            for (int i = 0; i < n; ++i) a[i * stride + i] += lambda * a[i * stride + i] + 1e-6;
+            SolveLinear(a, step, n);
+            double next[EQ_MAX_BANDS] = {};
+            for (int i = 0; i < n; ++i) next[i] = std::clamp(g[i] + step[i], -60.0, 60.0);
+            double error = squaredError(next);
+            if (error < current) {
+                std::copy(next, next + n, g);
+                better = current - error > 1e-9;
+                current = error;
+                lambda = std::max(lambda / 3.0, 1e-7);
+                if (!better) round = 1000;
+                better = true;
+            } else {
+                lambda *= 4.0;
+            }
+        }
+        if (!better) break;
+    }
+    // Half decibels, then each band tried one step up and down while the curve gets closer.
+    int tenths[EQ_MAX_BANDS] = {};
+    std::vector<double> contribution(stride * EQ_FIT_POINTS), sum(EQ_FIT_POINTS, 0.0);
+    for (int i = 0; i < n; ++i) {
+        tenths[i] = ClampInt(static_cast<int>(std::lround(g[i] * 10.0)), -EQ_HARD_MAX, EQ_HARD_MAX);
+        for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+            double value = BandResponseDb(layout, i, tenths[i] / 10.0, frequency[p]);
+            contribution[i * EQ_FIT_POINTS + p] = value;
+            sum[p] += value;
+        }
+    }
+    for (int pass = 0; pass < 6; ++pass) {
+        for (int i = 0; i < n; ++i) {
+            for (int step : {1, -1}) {
+                int trial = ClampInt(tenths[i] + step, -EQ_HARD_MAX, EQ_HARD_MAX);
+                if (trial == tenths[i]) continue;
+                double before = 0.0, after = 0.0;
+                std::vector<double> changed(EQ_FIT_POINTS);
+                for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+                    double old = contribution[i * EQ_FIT_POINTS + p];
+                    changed[p] = BandResponseDb(layout, i, trial / 10.0, frequency[p]);
+                    double d0 = target[p] - sum[p], d1 = target[p] - (sum[p] - old + changed[p]);
+                    before += d0 * d0;
+                    after += d1 * d1;
+                }
+                if (after < before) {
+                    for (int p = 0; p < EQ_FIT_POINTS; ++p) {
+                        sum[p] += changed[p] - contribution[i * EQ_FIT_POINTS + p];
+                        contribution[i * EQ_FIT_POINTS + p] = changed[p];
+                    }
+                    tenths[i] = trial;
+                }
+            }
+        }
+    }
+    std::fill(gains, gains + EQ_MAX_BANDS, 0);
+    std::copy(tenths, tenths + n, gains);
+}
+
 inline float RunBiquad(Biquad& filter, int channel, float x) {
     float y = filter.b0 * x + filter.z1[channel];
     filter.z1[channel] = filter.b1 * x - filter.a1 * y + filter.z2[channel];
@@ -10224,6 +10379,7 @@ struct EqualizerPanel {
     std::wstring guid;      // Or an output.
     std::wstring subtitle;  // What the equalizer belongs to.
     EqualizerState state;
+    int fit[EQ_MAX_BANDS] = {};  // See EqShownGain.
     bool effects = false;   // The effects page (LoudMax, loudness) instead of the bands.
     int drag = -1;          // The band being dragged.
     int hover = -1;         // The band under the pointer.
@@ -10264,6 +10420,21 @@ struct EqualizerPanel {
     bool failed = false;
 };
 EqualizerPanel g_eq;
+
+// The faders of a fine tuning layout show the curve of Basic fitted to its bands, plus what was moved on top of it:
+// the sound is Basic exactly, plus the moved bands. `fit` is that fitted curve, for the layout shown.
+int EqShownGain(int band) {
+    return g_eq.state.gains[band] + (g_eq.state.bands == EQ_TONE_BANDS ? 0 : g_eq.fit[band]);
+}
+
+void RefreshEqFit() {
+    std::fill(g_eq.fit, g_eq.fit + EQ_MAX_BANDS, 0);
+    if (g_eq.state.bands == EQ_TONE_BANDS || g_eq.state.hiddenBands != EQ_TONE_BANDS) return;
+    EqualizerState basic;
+    basic.bands = EQ_TONE_BANDS;
+    std::copy(g_eq.state.hidden, g_eq.state.hidden + EQ_TONE_BANDS, basic.gains);
+    if (EqualizerHasGain(basic)) FitEqualizerGains(basic, g_eq.state.bands, g_eq.fit);
+}
 PixelBuffer g_eqBlack, g_eqWhite;
 
 enum EqControl {
@@ -11047,7 +11218,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         if (shown >= 0) {
             readout = (layout.tone ? std::wstring(toneNames[shown]) + L"  ·  " : L"") +
                       EqFrequencyText(layout.frequencies[shown], true) + L"  ·  " +
-                      EqGainText(g_eq.state.gains[shown]);
+                      EqGainText(EqShownGain(shown));
         }
         const UINT align = (g_settings.advancedEqualizer ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
         bool fineTuned = false;
@@ -11090,7 +11261,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
                                                  : ThumbState::Rest;
             DrawEqSlider(dc, g, x, static_cast<float>(top), static_cast<float>(bottom),
                          static_cast<float>(zero),
-                         static_cast<float>(EqYForGain(g_eq.state.gains[band], top, bottom)),
+                         static_cast<float>(EqYForGain(EqShownGain(band), top, bottom)),
                          column - 2.0f * g_dpi / 96.0f, state, on);
             // Every band is named, except where 31 of them would crowd: there
             // the 1-2-5 steps are, and the hovered band.
@@ -11323,11 +11494,13 @@ void ApplyEqualizer(bool now) {
     }
 }
 
+// `gain` is what the fader shows: for a fine tuning layout, what is moved on top of the fitted curve is kept.
 void SetEqualizerGain(int band, int gain, bool show = true) {
     gain = ClampInt((gain + (gain >= 0 ? 2 : -2)) / 5 * 5, -EqLimit(), EqLimit());  // 0.5 dB steps.
     if (band < 0 || band >= g_eq.state.bands) return;
-    if (g_eq.state.gains[band] == gain && g_eq.state.on) return;
-    g_eq.state.gains[band] = gain;
+    int moved = ClampInt(gain - (g_eq.state.bands == EQ_TONE_BANDS ? 0 : g_eq.fit[band]), -EQ_HARD_MAX, EQ_HARD_MAX);
+    if (g_eq.state.gains[band] == moved && g_eq.state.on) return;
+    g_eq.state.gains[band] = moved;
     g_eq.state.on = true;  // Moving a band turns the equalizer on.
     g_eq.dirty = true;
     if (!show) return;
@@ -11391,6 +11564,7 @@ void ShowEqPresetMenu(HWND owner) {
         g_eq.state.hiddenBands = g_eq.state.bands == EQ_TONE_BANDS ? 0 : EQ_TONE_BANDS;
         std::fill(g_eq.state.hidden, g_eq.state.hidden + EQ_MAX_BANDS, 0);
         g_eq.state.on = true;
+        RefreshEqFit();
         g_eq.dirty = true;
         ApplyEqualizer(true);
     } else if (chosen == save) {
@@ -11618,6 +11792,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
     }
     // Without the advanced equalizer only Basic is shown; a fine tuning made before keeps playing underneath.
     if (!g_settings.advancedEqualizer) SwitchEqualizerView(g_eq.state, EQ_TONE_BANDS);
+    RefreshEqFit();
     g_eq.effects = (startOnEffects || sync) && EqHasEffects();
 
     // Over the mixer, as wide as it.
@@ -11814,6 +11989,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     if (count != g_eq.state.bands) {
                         // The sound stays as it is: Basic is kept, the fine tuning adds to it.
                         SwitchEqualizerView(g_eq.state, count);
+                        RefreshEqFit();
                         g_eq.hover = g_eq.focus = -1;
                         g_eq.dirty = true;
                         PaintEqualizer();
@@ -11860,7 +12036,8 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                 if (msg.hwnd != panel) {
                     done = true;
                 } else if (int band = EqBandAt(point); band >= 0) {
-                    SetEqualizerGain(band, 0);  // A right-click sets a band back to 0.
+                    // A right-click sets a band back: to 0, or to the curve of Basic on a fine tuning layout.
+                    SetEqualizerGain(band, g_eq.state.bands == EQ_TONE_BANDS ? 0 : g_eq.fit[band]);
                     ApplyEqualizer(true);
                 } else if (int control = EqControlAt(point);
                            control >= EQ_CHANNEL_FIRST && control < EQ_CHANNEL_FIRST + SURROUND_CHANNELS) {
@@ -11881,7 +12058,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                 int band = EqBandAt(cursor);
                 if (band >= 0) {
                     int notches = GET_WHEEL_DELTA_WPARAM(msg.wParam) / WHEEL_DELTA;
-                    SetEqualizerGain(band, g_eq.state.gains[band] + notches * 5);
+                    SetEqualizerGain(band, EqShownGain(band) + notches * 5);
                     ApplyEqualizer(true);
                 }
                 continue;
@@ -11916,7 +12093,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     case VK_UP:
                     case VK_DOWN:
                         if (g_eq.focus < 0) g_eq.focus = 0;
-                        SetEqualizerGain(g_eq.focus, g_eq.state.gains[g_eq.focus] +
+                        SetEqualizerGain(g_eq.focus, EqShownGain(g_eq.focus) +
                                                          (msg.wParam == VK_UP ? 5 : -5));
                         ApplyEqualizer(true);
                         break;
