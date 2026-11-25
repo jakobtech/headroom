@@ -12,8 +12,8 @@ git revert <commit>             # undo one change, keep the history
 ```
 
 ## 2.1.0-alpha7 (in progress)
-- Two outputs at once: Ctrl + right-click on the master row (or on an app, an output row or a listened-to input) and choose *Also play on another output...* to play the same sound on a second output as well, for example speakers and a headset. The sound runs through the mixer's engine, so it needs VB-CABLE. An app's own second output wins over the one of its output.
-- Sync the outputs: right after choosing, a page opens to line the two up by ear. *Play a test sound* gives a low click on the first output and a high one on the second; a slider (up to 1 s, finer near zero) and buttons for -10, -1, +1 and +10 ms move the second output later (right) or the first one (left) until the two are heard as one. It is also under *Sync the two outputs...* in the menu.
+- Two outputs at once: Ctrl + right-click on the master row (or on an app, an output row or a listened-to input) and choose *Also play on another output* to play the same sound on a second output as well, for example speakers and a headset. The sound runs through the mixer's engine, so it needs VB-CABLE. An app's own second output wins over the one of its output.
+- Sync the outputs: right after choosing, a page opens to line the two up by ear (also *Sync the two outputs* at the end of the same list). *Play a test sound* gives a soft low tap on the first output and a higher one on the second; a slider (up to 1 s, finer near zero) and buttons for -10, -1, +1 and +10 ms move the second output later (right) or the first one (left) until the two are heard as one.
 
 ## 2.1.0-alpha6
 - Start-up: when the settings file or the log cannot be read right after logging in (the disk or a virus scanner is still busy), Headroom waits for it, never writes over it, and loads the settings as soon as it can be read. Before, a session could start with everything at its default: no listened-to input, System sounds back in the list.

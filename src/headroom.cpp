@@ -9130,9 +9130,9 @@ PumpResult PumpOutput(FxRender& output, std::vector<float>& queue, size_t hold, 
     return result;
 }
 
-// A test sound for lining up two outputs: a short click every second on each, a fifth apart so the two can be told
-// from each other, with the delay between them applied the way the engine does it. The delay can be changed while
-// it plays.
+// A test sound for lining up two outputs: a soft tap every second on each (a low tone with a quick start and a short
+// fade), a fifth apart so the two can be told from each other, with the delay between them applied the way the engine
+// does it. The delay can be changed while it plays.
 struct MirrorTest {
     HANDLE thread = nullptr;
     HANDLE stop = nullptr;
@@ -9157,7 +9157,7 @@ DWORD WINAPI MirrorTestThread(void*) {
     }
     const ULONGLONG start = GetTickCount64();
     unsigned long long made = 0;
-    constexpr unsigned long long burst = rate / 25;  // 40 ms.
+    constexpr unsigned long long burst = rate / 5;  // 200 ms: the tap has faded long before.
     const double pi = 3.14159265358979323846;
     while (WaitForSingleObject(g_mirrorTest.stop, 5) == WAIT_TIMEOUT) {
         unsigned long long wanted = (GetTickCount64() - start) * rate / 1000;
@@ -9165,9 +9165,11 @@ DWORD WINAPI MirrorTestThread(void*) {
             unsigned long long position = made % rate;
             float a = 0.0f, b = 0.0f;
             if (position < burst) {
-                float envelope = 0.5f - 0.5f * static_cast<float>(std::cos(2.0 * pi * position / burst));
-                a = 0.3f * envelope * static_cast<float>(std::sin(2.0 * pi * 660.0 * position / rate));
-                b = 0.3f * envelope * static_cast<float>(std::sin(2.0 * pi * 990.0 * position / rate));
+                double seconds = static_cast<double>(position) / rate;
+                // 3 ms to come up, then it fades away.
+                float envelope = static_cast<float>(std::min(1.0, seconds / 0.003) * std::exp(-seconds / 0.045));
+                a = 0.14f * envelope * static_cast<float>(std::sin(2.0 * pi * 220.0 * seconds));
+                b = 0.14f * envelope * static_cast<float>(std::sin(2.0 * pi * 330.0 * seconds));
             }
             queueOne.push_back(a);
             queueOne.push_back(a);
@@ -10967,14 +10969,14 @@ void DrawEqualizer(HDC dc, const RECT& client) {
 
     if (g_eq.sync) {
         // Lining up two outputs by ear: a test sound on both, a slider, and small steps.
-        DrawLabel(dc, L"Both outputs play the same sound. Press the test sound, then move the slider until the two clicks "
+        DrawLabel(dc, L"Both outputs play the same sound. Press the test sound, then move the slider until the two taps "
                       L"are heard as one.",
                   at.syncText, g_smallFont, g_theme.secondaryText, DT_LEFT | DT_TOP | DT_WORDBREAK);
         RECT firstLine = at.syncNames, secondLine = at.syncNames;
         firstLine.bottom = secondLine.top = (at.syncNames.top + at.syncNames.bottom) / 2;
-        DrawLabel(dc, L"Low click: " + (g_eq.firstName.empty() ? std::wstring(L"the first output") : g_eq.firstName), firstLine,
+        DrawLabel(dc, L"Low tap: " + (g_eq.firstName.empty() ? std::wstring(L"the first output") : g_eq.firstName), firstLine,
                   g_bodyFont, g_theme.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        DrawLabel(dc, L"High click: " + (g_eq.mirrorName.empty() ? std::wstring(L"the second output") : g_eq.mirrorName), secondLine,
+        DrawLabel(dc, L"High tap: " + (g_eq.mirrorName.empty() ? std::wstring(L"the second output") : g_eq.mirrorName), secondLine,
                   g_bodyFont, g_theme.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         bool testHot = g_eq.control == EQ_SYNC_TEST;
         DrawSurface(dc, at.syncTest, Radius(14), g_eq.testing ? g_theme.accent : control, testHot ? 1.0f : 0.0f);
@@ -11000,7 +11002,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
             DrawSurface(dc, at.syncNudge[i], Radius(12), control, g_eq.control == EQ_SYNC_NUDGE_FIRST + i ? 1.0f : 0.0f);
             DrawLabel(dc, steps[i], at.syncNudge[i], g_bodyFont, g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        DrawLabel(dc, L"If the high click comes first, move right (or +). If the low click comes first, move left (or -). "
+        DrawLabel(dc, L"If the high tap comes first, move right (or +). If the low tap comes first, move left (or -). "
                       L"The arrow keys change it by 1 ms.",
                   at.syncHint, g_smallFont, g_theme.secondaryText, DT_LEFT | DT_TOP | DT_WORDBREAK);
         DrawLabel(dc, L"Played through the mixer's engine, about 40 ms later.", at.footer, g_smallFont,
@@ -12007,6 +12009,7 @@ void ChooseMirror(HWND window, const SyncRequest& request, POINT screenPoint) {
     items.push_back({L"", L"Not on a second output", L"", !DeviceMirrorActive(mirror)});
     ids.push_back(L"");
     int current = DeviceMirrorActive(mirror) ? -1 : 0;
+    const bool active = DeviceMirrorActive(mirror);
     for (const OutputDevice& output : outputs) {
         if (EndpointGuid(output.id) == EndpointGuid(request.first)) continue;  // Not the output it plays on already.
         if (DeviceMirrorActive(mirror) && _wcsicmp(output.id.c_str(), mirror.target.c_str()) == 0) {
@@ -12015,10 +12018,21 @@ void ChooseMirror(HWND window, const SyncRequest& request, POINT screenPoint) {
         items.push_back(output);
         ids.push_back(output.id);
     }
+    // Lining the two up by ear: at the end of the list, once there is a second output.
+    static const wchar_t syncGlyph[] = {0xE916, 0};
+    const int syncIndex = active ? static_cast<int>(items.size()) : -1;
+    if (active) {
+        items.push_back({L"", L"Sync the two outputs", syncGlyph, false});
+        ids.push_back(L"");
+    }
     g_outputMenuOpen = true;
     int chosen = RunOutputList(window, items, current, L"No other output", nullptr, &screenPoint);
     g_outputMenuOpen = false;
     if (!IsWindow(window) || chosen < 0 || chosen >= static_cast<int>(ids.size())) return;
+    if (chosen == syncIndex) {
+        OpenSyncPage(window, request);
+        return;
+    }
     if (chosen == 0) {
         mirror.on = false;
         StoreMirror(request.key, request.app, request.guid, mirror);
@@ -12045,7 +12059,7 @@ std::wstring AppFirstOutputId(DWORD pid, const std::wstring& exe) {
 // The label of the entry in the menus, and whether it is on.
 std::wstring MirrorMenuLabel(const std::wstring& key) {
     DeviceMirror mirror = LoadMirrorValue(key);
-    if (!DeviceMirrorActive(mirror)) return L"Also play on another output...";
+    if (!DeviceMirrorActive(mirror)) return L"Also play on another output";
     std::wstring name = OutputNameForId(mirror.target);
     return L"Also playing on: " + (name.empty() ? std::wstring(L"another output") : name);
 }
@@ -12089,10 +12103,6 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
         static const wchar_t mirrorGlyph[] = {0xE7F5, 0}, syncGlyph[] = {0xE916, 0};
         mirrorIndex = static_cast<int>(items.size());
         items.push_back({L"", MirrorMenuLabel(request.key), mirrorGlyph, request.first.empty()});
-        if (MirrorNeededFor(request.guid)) {
-            syncIndex = static_cast<int>(items.size());
-            items.push_back({L"", L"Sync the two outputs...", syncGlyph, false});
-        }
     }
     const std::wstring defaultDeviceId = DefaultDeviceId(g_flow);
     const int startVolume = defaultDeviceId.empty() ? -1 : Wh_GetIntValue(DeviceStartKey(defaultDeviceId).c_str(), -1);
@@ -12501,7 +12511,6 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         }
         mirrorRequest.name = (*g_apps)[row].name;
         add(MIRROR, MirrorMenuLabel(mirrorRequest.key).c_str(), mirrorGlyph, false);
-        if (DeviceMirrorActive(LoadMirrorValue(mirrorRequest.key))) add(SYNC, L"Sync the two outputs...", syncGlyph, false);
     }
     if (!device && g_flow == eRender) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
     if (!device && !(*g_apps)[row].virtualInput) add(COPY, L"Copy process name", L"\uE8C8", processName.empty());
