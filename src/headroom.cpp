@@ -10983,14 +10983,13 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         DrawLabel(dc, g_eq.testing ? L"Stop the test sound" : L"Play a test sound", at.syncTest, g_bodyFont,
                   g_eq.testing ? RGB(255, 255, 255) : g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         int offset = g_eq.mirror.offsetMs;
-        wchar_t value[96];
-        if (!offset) {
-            swprintf_s(value, L"No delay: both start together");
-        } else {
-            swprintf_s(value, offset > 0 ? L"The second output starts %d ms later" : L"The first output starts %d ms later",
-                       std::abs(offset));
-        }
-        DrawLabel(dc, value, at.mirrorValue, g_bodyFont, g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // The output that is held back, by its name.
+        std::wstring first = g_eq.firstName.empty() ? std::wstring(L"The first output") : g_eq.firstName;
+        std::wstring second = g_eq.mirrorName.empty() ? std::wstring(L"The second output") : g_eq.mirrorName;
+        std::wstring value = !offset ? std::wstring(L"No delay: both start together")
+                                     : (offset > 0 ? second : first) + L" starts " + std::to_wstring(std::abs(offset)) +
+                                           L" ms later";
+        DrawLabel(dc, value, at.mirrorValue, g_bodyFont, g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         float left, right, y;
         MirrorTrack(&left, &right, &y);
         float position = left + (right - left) * MirrorPosition(offset);
