@@ -609,6 +609,7 @@ void DrawWrapped(HDC dc, const std::wstring& text, RECT rect, COLORREF color, HF
 }
 
 void PaintSettings(HWND window) {
+    SlowWork slow(L"drawing the settings window", 100);
     PAINTSTRUCT paint;
     HDC target = BeginPaint(window, &paint);
     RECT client;
@@ -1292,8 +1293,13 @@ void DragSlider(int index, int x) {
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
     switch (message) {
-        case WM_ERASEBKGND:
+        case WM_ERASEBKGND: {
+            // The window's own color right away, so it never shows white while the first drawing waits.
+            RECT area;
+            GetClientRect(hwnd, &area);
+            FillSolidRect(reinterpret_cast<HDC>(wParam), area, g_theme.background);
             return 1;
+        }
         case WM_PAINT:
             PaintSettings(hwnd);
             return 0;
@@ -1578,6 +1584,7 @@ void ShowSettingsWindow() {
         RegisterClassExW(&wc);
         registered = true;
     }
+    SlowWork slow(L"opening the settings window", 100);
     BuildItems();
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
@@ -1626,6 +1633,7 @@ void ShowSettingsWindow() {
     LoadLists();
     SetThreadDpiAwarenessContext(previousAwareness);
     ShowWindow(g_ui.window, SW_SHOW);
+    UpdateWindow(g_ui.window);  // Drawn now, before anything else is handled.
     SetForegroundWindow(g_ui.window);
 }
 

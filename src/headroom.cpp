@@ -9865,7 +9865,20 @@ bool FxActiveForPid(DWORD pid) {
 
 // Starts streams for apps that need processing, stops the rest, and routes
 // back apps left on the silent output, also after a crash.
+// Logs when a piece of work on the mixer's thread took long: while it runs, no window of the mixer can draw.
+struct SlowWork {
+    PCWSTR what;
+    ULONGLONG start = GetTickCount64();
+    ULONGLONG limit;
+    explicit SlowWork(PCWSTR name, ULONGLONG milliseconds = 150) : what(name), limit(milliseconds) {}
+    ~SlowWork() {
+        ULONGLONG took = GetTickCount64() - start;
+        if (took >= limit) Wh_Log(L"Mixer: %s took %llu ms on the mixer's thread", what, took);
+    }
+};
+
 void UpdateFx(HWND window) {
+    SlowWork slow(L"the check of the audio streams");
     g_fxUpdatePending = false;
     static bool devicePublished = false;
     if (!devicePublished) {
