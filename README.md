@@ -4,203 +4,106 @@
 
 <p align="center">
 A small volume mixer for the Windows tray.<br>
-Per-app volume and output, boost up to 500 %, equalizer, limiter, loudness equalization, microphone tab,<br>
+Per-app volume and output, boost up to 500 %, equalizer, limiter, loudness equalization,<br>
 and sound on <b>two outputs at once</b>.
 </p>
 
 <p align="center">
 <a href="CHANGELOG.md">Changelog</a> ·
-<a href="#quick-start">Quick start</a> ·
-<a href="#using-it">Using it</a> ·
+<a href="#get-it">Get it</a> ·
 <a href="#two-outputs-at-once">Two outputs at once</a> ·
-<a href="#anti-cheat">Anti-cheat</a> ·
+<a href="#using-it">Using it</a> ·
 <a href="#faq">FAQ</a>
 </p>
-
----
 
 <p align="center">
 <img src="docs/mixer.png" alt="The Headroom mixer in the tray" width="300">
 </p>
 
-One click on the speaker icon in the tray opens a clean panel with the master volume and a slider for every app
-that makes sound. From there you can send an app to another output, raise it above 100 %, shape its sound, tame
-loud peaks, or even out the loudness of a game so that shots and explosions stay in check, all without loading
-anything into the app.
+One click on the tray icon opens a clean panel with the master volume and a slider for every app that makes sound.
+Send an app to another output, raise it above 100 %, shape its sound, even out the loudness of a game, hear it on
+two outputs at once. Nothing is loaded into the apps. It is one small program (under 1 MB) in plain C++ / Win32.
 
-It is a single small program (under 1 MB, no installer, no framework) written in C++ with plain Win32.
+> **`2.1.0-alpha8`, a test version.** Used daily, but young. Every released state is tagged, see the
+> [changelog](CHANGELOG.md).
 
-> **Status: `2.1.0-alpha8`, a test version.** It is used daily, but new parts such as the surround channels are
-> young. Every released state is tagged, so you can always go back to an earlier one.
-> See [CHANGELOG.md](CHANGELOG.md).
+## Get it
 
-## Highlights
+1. Download `Headroom-Setup-….exe` from the [releases](https://github.com/jakobtech/headroom/releases) and run it (no
+   administrator rights). Or take `Headroom.exe` from the same page, which runs on its own.
+2. Install the free [**VB-CABLE**](https://vb-audio.com/Cable/) (donationware). You need it for boost, the
+   equalizer, gain, LoudMax, loudness equalization and the second output. The volume, output and mute features work
+   without it.
+3. *Optional:* [**LoudMax**](https://loudmax.blogspot.com/), a free limiter. Put `LoudMax64.dll` in a VST folder
+   (for example `C:\Program Files\VSTPlugins`) or set its path in the settings.
 
-| | |
-|---|---|
-| **Volume** | Master and per-app volume, mute, mouse wheel, exact entry, keyboard control, pinned apps |
-| **Output per app** | Send any app to any output (the per-app output Windows Settings uses), or move all apps at once |
-| **Boost** | Unlock single apps up to **500 %** |
-| **Two outputs at once** | Hear the same sound on **speakers and a headset** at the same time: any output or app can also play on a second output, and a test sound helps you line the two up (see [below](#two-outputs-at-once)) |
-| **Equalizer** | Per app and per output. Bass/Mids/Treble, and with *Advanced equalizer* on also 5, 10 or 15 bands for fine tuning on top, without the sound changing when you switch. Presets and your own presets |
-| **LoudMax** | Limiter per app and per output (optional, free plugin) |
-| **Gain per output** | Raise a quiet output by up to 12 dB, with a limiter behind it |
-| **Loudness equalization** | Per app, six speeds from *Comp* (made for games) to *Long*, an expert mode and your own saved settings |
-| **Surround channels** | For games that play 5.1/7.1: a volume for each channel (front, center, back, sides, bass), for example to hear footsteps better |
-| **Microphone tab** | Default microphone with volume and mute, every input, and the apps that record right now |
-| **Volume at startup** | Set an app or a device to a fixed volume whenever it starts |
-| **Mute hotkeys** | Per app, also while the mixer is closed and while you play |
-| **Updates** | *Check for updates* in the settings: downloads, checks and installs a newer release, then restarts |
-| **Tidy** | Rename, hide (for now or for good) apps, devices and System sounds |
-| **Look** | Light, dark or Windows theme, Windows 11 or 10 style, blur, compact mode |
+Needs **Windows 11, 64 bit**. The settings have a **Setup guide** that shows what it found on your PC. Use the
+official pages above only. Headroom does not include or distribute VB-CABLE or LoudMax.
 
-Small badges next to a name tell you what is on for that app or output:
-`EQ` equalizer, `LM` LoudMax, `LE` loudness equalization, `CH` surround channels, `S50` volume at startup (50 %), `→ Output` fixed to an output.
-A click on a badge opens the matching panel.
+To remove it, uninstall in Windows *Settings > Apps* (or exit the portable copy and delete it). Settings are in
+`%APPDATA%\Headroom\settings.cfg`, the log in `%LOCALAPPDATA%\Headroom\log.txt`.
 
-## Screenshots
+## What it does
+
+- **Volume** per app and master, mute, mouse wheel, exact entry, keyboard control, pinned apps
+- **Output per app**, or move all apps at once
+- **Boost** single apps up to **500 %**
+- **Two outputs at once**, with a test sound to line them up
+- **Equalizer** per app and output: Basic (bass, mids, treble), with *Advanced equalizer* on also 5, 10, 15 bands
+- **LoudMax** limiter and **gain** (up to 12 dB) per app or output
+- **Loudness equalization** per app, from *Comp* (made for games) to *Long*
+- **Surround channels**: a volume for each channel of a 5.1/7.1 game, for example to hear footsteps better
+- **Microphone tab**, **volume at startup**, **mute hotkeys**, rename and hide, light/dark theme, **updates** from the settings
 
 <table>
 <tr>
-<td align="center"><img src="docs/equalizer.png" alt="Equalizer of an app" width="280"><br><sub>Equalizer, per app and per output</sub></td>
-<td align="center"><img src="docs/effects.png" alt="Effects: loudness equalization and surround channels" width="280"><br><sub>Effects: loudness and surround channels</sub></td>
+<td align="center"><img src="docs/equalizer.png" alt="Equalizer of an app" width="280"><br><sub>Equalizer</sub></td>
+<td align="center"><img src="docs/effects.png" alt="Effects: loudness equalization and surround channels" width="280"><br><sub>Effects</sub></td>
 <td align="center"><img src="docs/microphone.png" alt="The microphone tab" width="280"><br><sub>Microphone tab</sub></td>
 </tr>
 </table>
 
-<p align="center">
-<img src="docs/settings.png" alt="The settings window" width="620"><br>
-<sub>Settings, with reset, export and import</sub>
-</p>
+## Two outputs at once
 
-## Requirements
-
-- **Windows 11, 64 bit.** (The per-app effects use Windows' application loopback, which exists from Windows 10
-  build 20348.)
-- For **boost**, the **equalizer**, **gain** and **LoudMax** of apps and outputs, **loudness equalization**,
-  listening to an input and **playing on a second output**:
-  [**VB-CABLE**](https://vb-audio.com/Cable/), a small free virtual audio output (donationware).
-- *Optional:* [**LoudMax**](https://loudmax.blogspot.com/) (free, by its author) for the limiter. Put
-  `LoudMax64.dll` into a VST folder (for example `C:\Program Files\VSTPlugins`) or set its path in the settings.
-
-The settings window has a **Setup guide** page with these steps and shows what it found on your PC. Use the
-official pages above only: other sites that offer the same downloads may add unwanted software.
-
-Headroom does not include or distribute VB-CABLE or LoudMax. You install them yourself from their own pages and
-follow their terms.
-
-## Quick start
-
-1. Download `Headroom-Setup-….exe` from the [releases](https://github.com/jakobtech/headroom/releases) and run it
-   (no administrator rights needed). Prefer no installer? `Headroom.exe` from the same page runs on its own.
-   A speaker icon appears in the tray; drag it out of the overflow menu if you want it visible.
-2. Click it to open the mixer. Right-click it for the menu (settings, start with Windows, exit).
-3. Install the optional extras above if you want them.
-
-To remove it, uninstall it in Windows *Settings > Apps* (the setup asks whether to keep your settings). With the
-portable `Headroom.exe`: exit it from the tray menu, switch off *Start with Windows* in the same menu and delete the
-file. Settings live in `%APPDATA%\Headroom\settings.cfg`, the log in
-`%LOCALAPPDATA%\Headroom\log.txt`.
+Hear the same sound on your **speakers and your headset**. Ctrl + right-click the master volume, an app, an output or
+a listened-to input, choose **Also play on another output**, and pick the second one. A sync page opens: **Play a test
+sound** gives a low tap on the first output and a higher one on the second; move the slider (or the -10, -1, +1, +10 ms
+steps) until you hear one tap. Wireless headsets are often 100 to 200 ms behind, so this is what makes it sound right.
+The delay stays the same from one start to the next. It needs VB-CABLE and adds about 40 ms to both outputs.
 
 ## Using it
 
 | You do | What happens |
 |---|---|
-| Click the tray icon | Open or close the mixer |
-| Middle-click the tray icon | Mute the master volume |
-| Scroll over the tray icon | Change the master volume |
-| Right-click an app | Pick the output for that app |
-| Ctrl + right-click an app | Menu: output, rename, volume at startup, unlock up to 500 %, **Equalizer**, **Effects**, **Also play on another output**, mute hotkey, copy process name, hide |
-| Right-click the master volume | Pick the playback device (also sets the communications device) |
-| Ctrl + right-click the master volume | Output, volume at startup, **Equalizer**, **Effects**, **Also play on another output** for the default output |
-| Microphone button in the header | Switch the mixer to the microphone tab (and back) |
-| Menu button in the header | List every device with its own volume |
-| Ctrl + right-click a device in a list | Hide that device. Bring it back from the tray menu or in the settings |
-| Click a badge next to a name | Open that equalizer, the effects, or the startup volume |
+| Click / middle-click / scroll the tray icon | Open the mixer / mute / change the master volume |
+| Right-click an app | Pick its output |
+| **Ctrl + right-click** an app | Menu: output, rename, volume at startup, unlock 500 %, Equalizer, Effects, second output, mute hotkey, hide |
+| Right-click / **Ctrl + right-click** the master volume | Pick the playback device / menu with Equalizer, Effects, second output |
+| Microphone button in the header | Switch to the microphone tab |
+| Click a badge next to a name | Open that panel: `EQ` equalizer, `LM` LoudMax, `LE` loudness, `CH` channels, `S50` startup volume |
 
-**Effects** is its own page: the LoudMax switch (its original window in a frame that matches the mixer) and
-loudness equalization. Hover the small (i) next to a setting for a short explanation.
-
-**Equalizer:** drag a band, scroll over it, or right-click it to reset it. It starts with *Basic* (bass, mids,
-treble). Turn on *Advanced equalizer* in the settings to also choose 5, 10 or 15 bands. Switching does not change
-the sound: the faders of the new layout show your Basic curve, and what you move on top is a fine tuning that adds
-to it. Back on Basic, your Basic is as you left it.
-
-**Loudness equalization** turns loud sounds down and quiet ones up. *Comp* is made for games: footsteps come
-up, shots and explosions are cut within milliseconds, and the output queue is the shortest. *Custom* starts from
-any ready-made speed, has eight values and can be saved under a name for other apps.
-
-**Mute hotkeys:** Ctrl + right-click an app, *Set mute hotkey*, press the keys. Esc cancels, Del removes it.
-Letters and digits need Ctrl, Alt or Win; F1 to F11, F13 to F24, Pause, Scroll Lock and the media keys also work
-alone. Combinations Windows and programs use themselves (Alt+F4, Alt+Tab, Ctrl+C and the like) are refused.
-
-## Two outputs at once
-
-Play what you hear on **two outputs at the same time**, for example your speakers and your headset, or a headset
-and a second headset.
-
-1. Ctrl + right-click the **master volume** (for everything that plays on the default output), an **output row**,
-   an **app**, or a **listened-to input**, and choose **Also play on another output**.
-2. Pick the second output from the list. *Not on a second output* turns it off again.
-3. A **sync page** opens. Two outputs are rarely equally late: a Bluetooth or wireless headset can be 100 to 200 ms
-   behind speakers, so the sound would be heard twice, one after the other. Press **Play a test sound**: the first
-   output plays a soft low tap and the second a higher one, every second. Move the slider (or use the -10, -1,
-   +1 and +10 ms steps, or the arrow keys) until the two taps are heard as one. To the right delays the second output, to
-   the left the first, up to one second each way. If the high tap comes first, move right; if the low one comes first,
-   move left.
-
-The delay stays the same from one start to the next, so you set it once. An app can have its own second output; it
-wins over the one of the output it plays on. It needs **VB-CABLE** and adds about 40 ms to both outputs, because the sound runs
-through Headroom's engine. *Sync the two outputs* is at the end of the same list when a second output is set, to line
-them up again later, for example for another headset.
-
-## Anti-cheat
-
-The mixer never injects code into other programs and loads nothing into games. It only uses Windows' own audio
-interfaces: the audio session APIs, the per-app output setting that Windows Settings uses, and application
-loopback capture.
-
-That is how it is designed to stay clear of anti-cheat systems. There is no guarantee for a specific one, so
-check the rules of the games you play.
-
-## How the effects work
-
-For boost, the equalizer, gain, LoudMax and loudness equalization, Windows routes the app to the silent VB-CABLE
-output. The mixer records just that app with application loopback, processes the sound and plays it on the output
-the app is meant for. Nothing is loaded into the app. If anything fails, the app is routed back at once; when
-the mixer exits, every app is routed back.
-
-Measured on one PC, this path adds about 40 ms compared with an app that plays directly. Apps without effects
-play directly and have no extra delay. The equalizer, gain and LoudMax of an output work the same way for every
-app that plays on it.
+Hover the small (i) next to a setting for a short explanation. A mute hotkey is set in the Ctrl + right-click menu of an app.
 
 ## FAQ
 
-**Why do I need VB-CABLE?** Windows lets a program record an app only after the app's volume and mute are
-applied. To change an app's sound without a second copy playing, the app has to be sent somewhere silent first.
-That is what the virtual cable is for.
+**Why do I need VB-CABLE?** Windows lets a program record an app only after its volume is applied. To change an app's
+sound without a second copy playing, the app is sent to the silent virtual cable first, recorded, processed and played
+on the output it is meant for. Measured on one PC this adds about 40 ms; apps without effects play directly with none.
+If anything fails, the app is routed back at once.
 
-**What happens to an app's volume above 100 % when I limit it again?** It goes back to 100 %, the most Windows
-allows without the unlock.
+**Is it safe with anti-cheat?** Headroom never injects code or loads anything into games. It only uses Windows' own
+audio interfaces. That is how it is designed to stay clear of anti-cheat, but there is no guarantee for a specific
+one, so check the rules of your games.
 
-**Does "Volume at startup" keep the volume locked?** No. An app is set to it once, whenever it starts to play, and
-a device whenever the mixer starts or the device comes back. After that the volume is yours.
-
-**Can I use my own LoudMax or another path?** Yes, set its path in the settings.
-
-**There are now two speaker icons in the tray. Can I hide the one from Windows?** Windows has no setting for it
-on Windows 11. We recommend the free [Windhawk](https://windhawk.net/) mod
-[Taskbar tray system icon tweaks](https://windhawk.net/mods/taskbar-tray-system-icon-tweaks), which can hide
-Windows' own volume icon. Headroom itself does not change Explorer or any other program, so this stays your
-choice. Windhawk is a separate program.
+**Two speaker icons in the tray?** Windows has no setting for hiding its own. The free
+[Windhawk](https://windhawk.net/) mod [Taskbar tray system icon tweaks](https://windhawk.net/mods/taskbar-tray-system-icon-tweaks)
+can; it is a separate program, and Headroom does not change Explorer itself.
 
 ## Building
 
-The code is plain Win32 / GDI+ / COM in C++23. `build.ps1` builds it with an LLVM MinGW toolchain (the script
-uses the compiler that ships with Windhawk; change the path at the top to use your own) and the Windows SDK
-resource compiler. `build.sh` does the same with MSYS2's CLANG64 toolchain and is what the GitHub workflow uses.
-
-Measurement tools for the engine's delay are in `tests/`.
+Plain Win32 / GDI+ / COM in C++23. `build.ps1` builds with an LLVM MinGW toolchain (it uses the compiler that ships
+with Windhawk; change the path at the top) and the Windows SDK resource compiler. `build.sh` does the same with MSYS2's
+CLANG64 and is what the GitHub workflow uses. Measurement tools for the engine's delay are in `tests/`.
 
 ## Credits and license
 
