@@ -42,7 +42,7 @@ It is a single small program (under 1 MB, no installer, no framework) written in
 | **Equalizer** | Per app and per output. Bass/Mids/Treble or 5, 10, 15 bands, presets, your own presets |
 | **LoudMax** | Limiter per app and per output (optional, free plugin) |
 | **Gain per output** | Raise a quiet output by up to 12 dB, with a limiter behind it |
-| **Two outputs at once** | Play an output on a second one as well (speakers and a headset), with an adjustable delay so both are heard together |
+| **Two outputs at once** | Play an output or an app on a second output as well (speakers and a headset), with a test sound to line the two up |
 | **Loudness equalization** | Per app, six speeds from *Comp* (made for games) to *Long*, an expert mode and your own saved settings |
 | **Surround channels** | For games that play 5.1/7.1: a volume for each channel (front, center, back, sides, bass), for example to hear footsteps better |
 | **Microphone tab** | Default microphone with volume and mute, every input, and the apps that record right now |

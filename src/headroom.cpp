@@ -7970,10 +7970,10 @@ bool DeviceMirrorActive(const DeviceMirror& mirror) {
     return mirror.on && !mirror.target.empty();
 }
 
-DeviceMirror LoadDeviceMirror(const std::wstring& guid) {
+DeviceMirror LoadMirrorValue(const std::wstring& name) {
     DeviceMirror mirror;
     wchar_t buffer[256]{};
-    Wh_GetStringValue((L"devMirror_v1:" + guid).c_str(), buffer, ARRAYSIZE(buffer));
+    Wh_GetStringValue(name.c_str(), buffer, ARRAYSIZE(buffer));
     buffer[ARRAYSIZE(buffer) - 1] = L'\0';
     if (!buffer[0]) return mirror;
     mirror.on = buffer[0] == L'1';
@@ -7986,9 +7986,18 @@ DeviceMirror LoadDeviceMirror(const std::wstring& guid) {
     return mirror;
 }
 
-void SaveDeviceMirror(const std::wstring& guid, const DeviceMirror& mirror) {
+void SaveMirrorValue(const std::wstring& name, const DeviceMirror& mirror) {
     std::wstring stored = std::wstring(mirror.on ? L"1;" : L"0;") + std::to_wstring(mirror.offsetMs) + L";" + mirror.target;
-    Wh_SetStringValue((L"devMirror_v1:" + guid).c_str(), stored.c_str());
+    Wh_SetStringValue(name.c_str(), stored.c_str());
+}
+
+// Of an output ("devMirror_v1:<output GUID>"), or of an app or listened-to input ("appMirror_v1:<name>"): an app
+// that has one plays on it, whatever the output it plays on does.
+DeviceMirror LoadDeviceMirror(const std::wstring& guid) {
+    return LoadMirrorValue(L"devMirror_v1:" + guid);
+}
+DeviceMirror LoadAppMirror(const std::wstring& exe) {
+    return LoadMirrorValue(L"appMirror_v1:" + exe);
 }
 
 bool UseApoForDevices() {
@@ -8488,10 +8497,14 @@ struct FxSettings {
     LoudnessState loudness;
     ChannelMixState channels;
     std::wstring target;  // Empty: the default output.
+    DeviceMirror mirror;  // Also played on a second output.
 };
 
 bool FxNeeded(const FxSettings& settings) {
-    if (settings.gain > 1.001f || settings.loudMax.on || settings.loudness.on || settings.channels.on) return true;
+    if (settings.gain > 1.001f || settings.loudMax.on || settings.loudness.on || settings.channels.on ||
+        DeviceMirrorActive(settings.mirror)) {
+        return true;
+    }
     if (!settings.eq.on) return false;
     for (int gain : settings.eq.gains) {
         if (gain) return true;
@@ -8515,6 +8528,7 @@ FxSettings BuildFxSettings(const std::wstring& exe) {
     settings.channels = LoadChannelMix(exe);
     std::wstring target = FxTarget(exe);
     settings.target = target == FX_FOLLOW_DEFAULT ? std::wstring() : target;
+    settings.mirror = LoadAppMirror(exe);
     if (IsInputKey(exe)) {
         DeviceGain boost = LoadDeviceGain(InputGuid(exe));
         float volume = MonitorMuted(InputGuid(exe)) ? 0.0f : MonitorVolume(InputGuid(exe));
@@ -9029,17 +9043,24 @@ bool OpenFxRender(IMMDeviceEnumerator* enumerator, const std::wstring& target,
     FxRender render;
     render.deviceId = id;
     WAVEFORMATEX format = FxFormat(true, rate);
-    bool ok =
-        SUCCEEDED(device->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr,
-                                   reinterpret_cast<void**>(&render.client))) &&
-        SUCCEEDED(render.client->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-            500000, 0, &format, nullptr)) &&
-        SUCCEEDED(render.client->GetBufferSize(&render.frames)) &&
-        SUCCEEDED(render.client->GetService(__uuidof(IAudioRenderClient),
-                                            reinterpret_cast<void**>(&render.render))) &&
-        SUCCEEDED(render.client->Start());
+    HRESULT step[5];
+    step[0] = device->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr,
+                               reinterpret_cast<void**>(&render.client));
+    step[1] = SUCCEEDED(step[0])
+        ? render.client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                                    500000, 0, &format, nullptr)
+        : E_FAIL;
+    step[2] = SUCCEEDED(step[1]) ? render.client->GetBufferSize(&render.frames) : E_FAIL;
+    step[3] = SUCCEEDED(step[2]) ? render.client->GetService(__uuidof(IAudioRenderClient),
+                                                              reinterpret_cast<void**>(&render.render))
+                                 : E_FAIL;
+    step[4] = SUCCEEDED(step[3]) ? render.client->Start() : E_FAIL;
+    bool ok = SUCCEEDED(step[4]);
+    if (!ok && exact) {
+        Wh_Log(L"Mixer: opening an output failed: activate 0x%08lX, initialize 0x%08lX, start 0x%08lX",
+               static_cast<unsigned long>(step[0]), static_cast<unsigned long>(step[1]), static_cast<unsigned long>(step[4]));
+    }
     device->Release();
     if (!ok) {
         render.Close();
@@ -9069,6 +9090,126 @@ float FxCeiling(IMMDeviceEnumerator* enumerator, const std::wstring& id) {
     if (volume) volume->Release();
     if (device) device->Release();
     return ceiling;
+}
+
+// Lets a queue's samples through to its output: as many as keep about queueMs queued there, and never the last
+// `hold` samples, which are that output's delay. What piles up when two devices' clocks drift apart is dropped.
+struct PumpResult {
+    UINT32 padding = 0;  // Already queued in the device before this call.
+    size_t ready = 0;    // Samples that could be let through.
+    bool wrote = false;
+};
+
+PumpResult PumpOutput(FxRender& output, std::vector<float>& queue, size_t hold, DWORD rate, int queueMs) {
+    PumpResult result;
+    result.ready = queue.size() > hold ? queue.size() - hold : 0;
+    if (output.client) {
+        UINT32 padding = 0;
+        HRESULT state = output.client->GetCurrentPadding(&padding);
+        if (state == AUDCLNT_E_DEVICE_INVALIDATED) {
+            output.Close();
+        } else if (SUCCEEDED(state)) {
+            result.padding = padding;
+            UINT32 wanted = rate * queueMs / 1000;
+            UINT32 room = padding < wanted ? wanted - padding : 0;
+            room = std::min(room, output.frames - std::min(output.frames, padding));
+            UINT32 frames = std::min<UINT32>(room, static_cast<UINT32>(result.ready / 2));
+            BYTE* target = nullptr;
+            if (frames && SUCCEEDED(output.render->GetBuffer(frames, &target))) {
+                memcpy(target, queue.data(), static_cast<size_t>(frames) * 2 * sizeof(float));
+                output.render->ReleaseBuffer(frames, 0);
+                queue.erase(queue.begin(), queue.begin() + static_cast<size_t>(frames) * 2);
+                result.wrote = true;
+            }
+        }
+    }
+    size_t limit = static_cast<size_t>(rate) / 10 * 2;  // 100 ms.
+    if (queue.size() > hold + limit) {
+        queue.erase(queue.begin(), queue.end() - static_cast<std::ptrdiff_t>(hold + limit / 2));
+    }
+    return result;
+}
+
+// A test sound for lining up two outputs: a short click every second on each, a fifth apart so the two can be told
+// from each other, with the delay between them applied the way the engine does it. The delay can be changed while
+// it plays.
+struct MirrorTest {
+    HANDLE thread = nullptr;
+    HANDLE stop = nullptr;
+    std::wstring first, second;
+};
+MirrorTest g_mirrorTest;
+std::atomic<int> g_mirrorTestOffset{0};
+
+DWORD WINAPI MirrorTestThread(void*) {
+    HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    constexpr DWORD rate = 48000;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    FxRender one, two;
+    std::vector<float> queueOne, queueTwo;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator)))) {
+        OpenFxRender(enumerator, g_mirrorTest.first, L"", rate, &one, true);
+        OpenFxRender(enumerator, g_mirrorTest.second, L"", rate, &two, true);
+        Wh_Log(L"Mixer: sync test sound, first output %s, second output %s", one.client ? L"open" : L"not open",
+               two.client ? L"open" : L"not open");
+    }
+    const ULONGLONG start = GetTickCount64();
+    unsigned long long made = 0;
+    constexpr unsigned long long burst = rate / 25;  // 40 ms.
+    const double pi = 3.14159265358979323846;
+    while (WaitForSingleObject(g_mirrorTest.stop, 5) == WAIT_TIMEOUT) {
+        unsigned long long wanted = (GetTickCount64() - start) * rate / 1000;
+        for (; made < wanted; ++made) {
+            unsigned long long position = made % rate;
+            float a = 0.0f, b = 0.0f;
+            if (position < burst) {
+                float envelope = 0.5f - 0.5f * static_cast<float>(std::cos(2.0 * pi * position / burst));
+                a = 0.3f * envelope * static_cast<float>(std::sin(2.0 * pi * 660.0 * position / rate));
+                b = 0.3f * envelope * static_cast<float>(std::sin(2.0 * pi * 990.0 * position / rate));
+            }
+            queueOne.push_back(a);
+            queueOne.push_back(a);
+            queueTwo.push_back(b);
+            queueTwo.push_back(b);
+        }
+        int offset = g_mirrorTestOffset.load();
+        size_t delay = static_cast<size_t>(std::abs(offset)) * rate / 1000 * 2;
+        PumpOutput(one, queueOne, offset < 0 ? delay : 0, rate, 30);
+        PumpOutput(two, queueTwo, offset > 0 ? delay : 0, rate, 30);
+        if (!one.client) queueOne.clear();
+        if (!two.client) queueTwo.clear();
+    }
+    one.Close();
+    two.Close();
+    if (enumerator) enumerator->Release();
+    if (SUCCEEDED(com)) CoUninitialize();
+    return 0;
+}
+
+void StopMirrorTest() {
+    if (!g_mirrorTest.thread) return;
+    SetEvent(g_mirrorTest.stop);
+    WaitForSingleObject(g_mirrorTest.thread, 3000);
+    CloseHandle(g_mirrorTest.thread);
+    CloseHandle(g_mirrorTest.stop);
+    g_mirrorTest = {};
+}
+
+bool StartMirrorTest(const std::wstring& first, const std::wstring& second, int offsetMs) {
+    StopMirrorTest();
+    g_mirrorTest.first = first;
+    g_mirrorTest.second = second;
+    g_mirrorTestOffset = offsetMs;
+    g_mirrorTest.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_mirrorTest.thread = g_mirrorTest.stop ? CreateThread(nullptr, 0, MirrorTestThread, nullptr, 0, nullptr) : nullptr;
+    if (!g_mirrorTest.thread) {
+        if (g_mirrorTest.stop) CloseHandle(g_mirrorTest.stop);
+        g_mirrorTest = {};
+        return false;
+    }
+    return true;
 }
 
 DWORD WINAPI FxStreamThread(void* parameter) {
@@ -9132,8 +9273,9 @@ DWORD WINAPI FxStreamThread(void* parameter) {
     };
 
     // The second output of the one this stream plays on, picked up when the output or the settings change.
-    auto refreshMirror = [&]() {
-        DeviceMirror want = render.deviceId.empty() ? DeviceMirror{} : ReadDeviceMirror(EndpointGuid(render.deviceId));
+    auto refreshMirror = [&](const FxSettings& current) {
+        DeviceMirror want = DeviceMirrorActive(current.mirror) ? current.mirror
+                          : render.deviceId.empty() ? DeviceMirror{} : ReadDeviceMirror(EndpointGuid(render.deviceId));
         bool use = DeviceMirrorActive(want) && _wcsicmp(want.target.c_str(), render.deviceId.c_str()) != 0 &&
                    _wcsicmp(want.target.c_str(), sink.c_str()) != 0;
         holdMain = holdMirror = 0;
@@ -9150,6 +9292,8 @@ DWORD WINAPI FxStreamThread(void* parameter) {
             mirrorQueue.clear();
             mirrorWanted = want.target;
             nextMirrorTry = 0;
+            Wh_Log(L"Mixer: %s is to be played on a second output as well (%s), %d ms apart", stream->exe.c_str(),
+                   DeviceMirrorActive(current.mirror) ? L"its own choice" : L"the choice of its output", want.offsetMs);
         }
     };
 
@@ -9276,13 +9420,15 @@ DWORD WINAPI FxStreamThread(void* parameter) {
         if (render.client && render.deviceId != lastDevice) {
             lastDevice = render.deviceId;
             refreshDevice();
-            refreshMirror();
+            refreshMirror(settings);
         }
         if (!mirrorWanted.empty() && !mirror.client && now >= nextMirrorTry) {
             nextMirrorTry = now + 2000;  // The second output may be off or unplugged: look again shortly.
             if (OpenFxRender(enumerator, mirrorWanted, sink, rate, &mirror, true)) {
                 mirrorQueue.clear();
                 Wh_Log(L"Mixer: %s is also played on a second output", stream->exe.c_str());
+            } else {
+                Wh_Log(L"Mixer: the second output of %s could not be opened", stream->exe.c_str());
             }
         }
         if (!render.client) lastDevice.clear();
@@ -9346,36 +9492,15 @@ DWORD WINAPI FxStreamThread(void* parameter) {
         // Keep about 40 ms queued in each output; drop what piles up when the devices' clocks drift apart.
         // What an output is delayed by stays in its queue and is let through later.
         auto feed = [&](FxRender& output, std::vector<float>& queue, size_t hold, bool first) {
-            if (output.client) {
-                UINT32 padding = 0;
-                HRESULT state = output.client->GetCurrentPadding(&padding);
-                size_t ready = queue.size() > hold ? queue.size() - hold : 0;
-                if (state == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    output.Close();
-                } else if (SUCCEEDED(state)) {
-                    if (first && padding == 0 && ready && lastPlayed && now - lastPlayed < 60 && extraMs < 25 &&
-                        now - started > 3000 && now - lastGrow > 2000) {
-                        lastGrow = now;
-                        extraMs += 5;
-                        Wh_Log(L"Mixer: output of %s ran dry, queue now %d ms", stream->exe.c_str(), queueMs + extraMs);
-                    }
-                    UINT32 wanted = rate * (queueMs + extraMs) / 1000;
-                    UINT32 room = padding < wanted ? wanted - padding : 0;
-                    room = std::min(room, output.frames - std::min(output.frames, padding));
-                    UINT32 frames = std::min<UINT32>(room, static_cast<UINT32>(ready / 2));
-                    BYTE* target = nullptr;
-                    if (frames && SUCCEEDED(output.render->GetBuffer(frames, &target))) {
-                        memcpy(target, queue.data(), static_cast<size_t>(frames) * 2 * sizeof(float));
-                        output.render->ReleaseBuffer(frames, 0);
-                        queue.erase(queue.begin(), queue.begin() + static_cast<size_t>(frames) * 2);
-                        if (first) lastPlayed = now;
-                    }
-                }
+            PumpResult pumped = PumpOutput(output, queue, hold, rate, queueMs + extraMs);
+            if (!first) return;
+            if (output.client && pumped.padding == 0 && pumped.ready && lastPlayed && now - lastPlayed < 60 &&
+                extraMs < 25 && now - started > 3000 && now - lastGrow > 2000) {
+                lastGrow = now;
+                extraMs += 5;
+                Wh_Log(L"Mixer: output of %s ran dry, queue now %d ms", stream->exe.c_str(), queueMs + extraMs);
             }
-            size_t limit = static_cast<size_t>(rate) / 10 * 2;  // 100 ms.
-            if (queue.size() > hold + limit) {
-                queue.erase(queue.begin(), queue.end() - static_cast<std::ptrdiff_t>(hold + limit / 2));
-            }
+            if (pumped.wrote) lastPlayed = now;
         };
         feed(render, fifo, holdMain, true);
         if (mirror.client) feed(mirror, mirrorQueue, holdMirror, false);
@@ -10136,9 +10261,16 @@ struct EqualizerPanel {
     bool input = false;         // An input: its settings are kept like an app's, under "in:<GUID>".
     bool monitorOn = false;
     bool gainDrag = false;
-    DeviceMirror mirror;        // Outputs: also played on a second one.
-    std::wstring mirrorName;    // The name of that second output.
+    // The page that lines up two outputs (the second output of an output or an app): a test sound, a slider, steps.
+    bool sync = false;
+    std::wstring mirrorKey;     // Its settings name: "devMirror_v1:<GUID>" or "appMirror_v1:<app>".
+    std::wstring mirrorApp;     // The app (or input) it belongs to; empty for an output.
+    std::wstring mirrorGuid;    // The output's GUID, for an output.
+    std::wstring syncFirst;     // The id of the output the sound plays on first.
+    std::wstring firstName, mirrorName;
+    DeviceMirror mirror;
     bool mirrorDrag = false;
+    bool testing = false;       // The test sound plays.
     ULONGLONG mirrorSaved = 0;
     ULONGLONG gainSaved = 0;
     ULONGLONG expertSaved = 0;
@@ -10155,8 +10287,8 @@ enum EqControl {
     EQ_EXPERT_RESET = EQ_LAYOUT_FIRST + 16, EQ_LOUD_PRESETS, EQ_EXPERT_FIRST,
     EQ_CHANNELS_TOGGLE = EQ_EXPERT_FIRST + LOUD_PARAMS, EQ_CHANNEL_FIRST,
     EQ_GAIN_TOGGLE = EQ_CHANNEL_FIRST + SURROUND_CHANNELS, EQ_GAIN_SLIDER, EQ_MONITOR_TOGGLE,
-    EQ_MIRROR_TOGGLE, EQ_MIRROR_TARGET, EQ_MIRROR_SLIDER,
-    EQ_INFO_LOUDMAX, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_GAIN, EQ_INFO_MONITOR, EQ_INFO_MIRROR, EQ_INFO_FIRST,
+    EQ_SYNC_TEST, EQ_MIRROR_SLIDER, EQ_SYNC_NUDGE_FIRST, EQ_SYNC_NUDGE_END = EQ_SYNC_NUDGE_FIRST + 5,
+    EQ_INFO_LOUDMAX, EQ_INFO_LOUDNESS, EQ_INFO_CHANNELS, EQ_INFO_GAIN, EQ_INFO_MONITOR, EQ_INFO_FIRST,
 };
 
 // Where everything sits, for the current page.
@@ -10173,7 +10305,7 @@ struct EqGeometry {
     RECT channelsRow, channelsToggle, infoChannels, channelCaption, channelChip[SURROUND_CHANNELS];
     RECT gainRow, gainToggle, infoGain, gainValue, gainTrack, gainNote;
     RECT monitorRow, monitorToggle, infoMonitor, monitorNote;
-    RECT mirrorRow, mirrorToggle, infoMirror, mirrorTarget, mirrorValue, mirrorTrack, mirrorNote;
+    RECT syncText, syncNames, syncTest, mirrorValue, mirrorTrack, syncNudge[5], syncHint;
     RECT footer;
     int height;
 };
@@ -10190,7 +10322,21 @@ EqGeometry EqMeasure(int width) {
     EqGeometry at{};
     at.close = {width - Scale(47), Scale(9), width - Scale(15), Scale(41)};
     int y = Scale(68);
-    if (g_eq.effects) {
+    if (g_eq.sync) {
+        at.syncText = {Scale(24), y, width - Scale(24), y + Scale(40)};
+        at.syncNames = {Scale(24), y + Scale(46), width - Scale(24), y + Scale(86)};
+        at.syncTest = {Scale(24), y + Scale(96), width - Scale(24), y + Scale(136)};
+        at.mirrorValue = {Scale(24), y + Scale(148), width - Scale(24), y + Scale(172)};
+        at.mirrorTrack = {Scale(24), y + Scale(176), width - Scale(24), y + Scale(198)};
+        int gap = Scale(6);
+        int buttonWidth = (width - Scale(48) - 4 * gap) / 5;
+        for (int i = 0; i < 5; ++i) {
+            int left = Scale(24) + i * (buttonWidth + gap);
+            at.syncNudge[i] = {left, y + Scale(208), left + buttonWidth, y + Scale(244)};
+        }
+        at.syncHint = {Scale(24), y + Scale(252), width - Scale(24), y + Scale(292)};
+        y += Scale(298);
+    } else if (g_eq.effects) {
         if (g_eq.input) {
             // Listening to the input through the mixer: a switch and a note.
             at.monitorRow = {Scale(12), y, width - Scale(12), y + Scale(92)};
@@ -10221,18 +10367,6 @@ EqGeometry EqMeasure(int width) {
             at.gainTrack = {Scale(28), y + Scale(52), width - Scale(28), y + Scale(74)};
             at.gainNote = {Scale(28), y + Scale(78), width - Scale(28), y + Scale(102)};
             y += Scale(116);
-        }
-        if (g_eq.app.empty() && g_flow == eRender) {
-            // Also played on a second output: a switch, the other output, and the delay between the two.
-            at.mirrorRow = {Scale(12), y, width - Scale(12), y + Scale(176)};
-            int middle = y + Scale(26);
-            at.mirrorToggle = {width - Scale(66), middle - Scale(10), width - Scale(26), middle + Scale(10)};
-            at.infoMirror = {at.mirrorToggle.left - Scale(30), middle - Scale(9), at.mirrorToggle.left - Scale(12), middle + Scale(9)};
-            at.mirrorTarget = {Scale(28), y + Scale(48), width - Scale(28), y + Scale(84)};
-            at.mirrorValue = {Scale(28), y + Scale(92), width - Scale(28), y + Scale(114)};
-            at.mirrorTrack = {Scale(28), y + Scale(116), width - Scale(28), y + Scale(138)};
-            at.mirrorNote = {Scale(28), y + Scale(142), width - Scale(28), y + Scale(168)};
-            y += Scale(180);
         }
         if (!g_eq.app.empty()) {
             bool custom = g_eq.loudness.release == 4;
@@ -10346,13 +10480,6 @@ const wchar_t* EqInfoText(int control) {
                L"line-in, for example a console. If Windows is already playing the input (the Listen to this "
                L"device setting of the input), turn that off, or you hear it twice.";
     }
-    if (control == EQ_INFO_MIRROR) {
-        return L"Plays everything this output plays on a second output as well, for example speakers and a headset "
-               L"at the same time. The sound runs through the mixer's engine (it needs VB-CABLE and adds about 40 ms "
-               L"to both). Two outputs are rarely equally late: a Bluetooth headset can be 150 ms behind. Move the "
-               L"slider so that both are heard together: to the right delays the second output, to the left the first "
-               L"one. The equalizer and gain of this output apply to both when the mixer's own engine does them.";
-    }
     if (control == EQ_INFO_GAIN) {
         return L"Raises everything that plays on this output, by up to 12 dB, for a device that is too "
                L"quiet. With Equalizer APO it works for all sound, system sounds included. With the mixer's own "
@@ -10380,7 +10507,7 @@ void UpdateEqInfoTip(int control) {
         HideInfoTip();
         return;
     }
-    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS && control != EQ_INFO_GAIN && control != EQ_INFO_MONITOR && control != EQ_INFO_MIRROR &&
+    if (control != EQ_INFO_LOUDMAX && control != EQ_INFO_LOUDNESS && control != EQ_INFO_CHANNELS && control != EQ_INFO_GAIN && control != EQ_INFO_MONITOR &&
         (control < EQ_INFO_FIRST || control >= EQ_INFO_FIRST + LOUD_PARAMS)) {
         HideInfoTip();
         return;
@@ -10390,7 +10517,6 @@ void UpdateEqInfoTip(int control) {
               : control == EQ_INFO_CHANNELS ? g_eqAt.infoChannels
               : control == EQ_INFO_GAIN ? g_eqAt.infoGain
               : control == EQ_INFO_MONITOR ? g_eqAt.infoMonitor
-              : control == EQ_INFO_MIRROR ? g_eqAt.infoMirror
                                             : g_eqAt.info[control - EQ_INFO_FIRST];
     MapWindowPoints(g_eq.window, nullptr, reinterpret_cast<POINT*>(&rect), 2);
     ShowInfoTip(g_eq.window, rect, EqInfoText(control));
@@ -10441,6 +10567,14 @@ int EqBandAt(POINT point) {
 int EqControlAt(POINT point) {
     const EqGeometry& at = g_eqAt;
     if (PtInRect(&at.close, point)) return EQ_CLOSE;
+    if (g_eq.sync) {
+        if (PtInRect(&at.syncTest, point)) return EQ_SYNC_TEST;
+        if (PtInRect(&at.mirrorTrack, point)) return EQ_MIRROR_SLIDER;
+        for (int i = 0; i < 5; ++i) {
+            if (PtInRect(&at.syncNudge[i], point)) return EQ_SYNC_NUDGE_FIRST + i;
+        }
+        return -1;
+    }
     if (g_eq.effects) {
         if (g_eq.input) {
             if (PtInRect(&at.monitorToggle, point)) return EQ_MONITOR_TOGGLE;
@@ -10455,12 +10589,6 @@ int EqControlAt(POINT point) {
             if (PtInRect(&at.gainToggle, point)) return EQ_GAIN_TOGGLE;
             if (PtInRect(&at.infoGain, point)) return EQ_INFO_GAIN;
             if (PtInRect(&at.gainTrack, point)) return EQ_GAIN_SLIDER;
-        }
-        if (g_eq.app.empty() && g_flow == eRender) {
-            if (PtInRect(&at.mirrorToggle, point)) return EQ_MIRROR_TOGGLE;
-            if (PtInRect(&at.infoMirror, point)) return EQ_INFO_MIRROR;
-            if (PtInRect(&at.mirrorTarget, point)) return EQ_MIRROR_TARGET;
-            if (PtInRect(&at.mirrorTrack, point)) return EQ_MIRROR_SLIDER;
         }
         if (!g_eq.app.empty()) {
             if (PtInRect(&at.loudnessToggle, point)) return EQ_LOUDNESS_TOGGLE;
@@ -10683,11 +10811,20 @@ void SetGainFromPoint(POINT point, bool now) {
     PaintEqualizer();
 }
 
-// Saves the second output and hands it on: the streams on this output pick it up.
+// Keeps the second output of an output or of an app, and hands it on: the streams pick it up.
+void StoreMirror(const std::wstring& key, const std::wstring& app, const std::wstring& guid, const DeviceMirror& mirror) {
+    SaveMirrorValue(key, mirror);
+    if (!app.empty()) {
+        FxSettingsChanged(app);
+    } else {
+        AddEqualizerDevice(guid);
+        WriteEqualizerConfig();
+    }
+}
+
 void SaveMirror() {
-    SaveDeviceMirror(g_eq.guid, g_eq.mirror);
-    AddEqualizerDevice(g_eq.guid);
-    g_eq.failed = !WriteEqualizerConfig();
+    StoreMirror(g_eq.mirrorKey, g_eq.mirrorApp, g_eq.mirrorGuid, g_eq.mirror);
+    g_mirrorTestOffset = g_eq.mirror.offsetMs;  // The test sound follows the slider.
 }
 
 std::wstring OutputNameForId(const std::wstring& id) {
@@ -10703,28 +10840,6 @@ std::wstring OutputNameForId(const std::wstring& id) {
     if (device) device->Release();
     if (enumerator) enumerator->Release();
     return name;
-}
-
-// The list of the other outputs, under the field of the second output.
-void ShowMirrorMenu(HWND owner) {
-    std::vector<OutputDevice> outputs;
-    std::wstring currentId;
-    LoadOutputDevices(outputs, currentId);
-    std::vector<OutputDevice> items;
-    int current = -1;
-    for (const OutputDevice& output : outputs) {
-        if (EndpointGuid(output.id) == g_eq.guid) continue;  // Not the output itself.
-        if (_wcsicmp(output.id.c_str(), g_eq.mirror.target.c_str()) == 0) current = static_cast<int>(items.size());
-        items.push_back(output);
-    }
-    RECT anchor = g_eqAt.mirrorTarget;
-    MapWindowPoints(g_eq.window, owner, reinterpret_cast<POINT*>(&anchor), 2);
-    int chosen = RunOutputList(owner, items, current, L"No other output", &anchor);
-    if (chosen >= 0 && chosen < static_cast<int>(items.size())) {
-        g_eq.mirror.target = items[static_cast<size_t>(chosen)].id;
-        g_eq.mirrorName = ShortOutputName(items[static_cast<size_t>(chosen)].name);
-        SaveMirror();
-    }
 }
 
 // The delay track: the middle is no delay, to the right delays the second output, to the left the first one.
@@ -10755,6 +10870,14 @@ void SetMirrorFromPoint(POINT point, bool now) {
         g_eq.mirrorSaved = tick;
         SaveMirror();
     }
+    PaintEqualizer();
+}
+
+// The small steps under the slider: 10 ms and 1 ms either way, and back to none.
+void NudgeMirror(int index) {
+    static constexpr int deltas[5] = {-10, -1, 0, 1, 10};
+    g_eq.mirror.offsetMs = index == 2 ? 0 : std::clamp(g_eq.mirror.offsetMs + deltas[index], -MIRROR_DELAY_MAX, MIRROR_DELAY_MAX);
+    SaveMirror();
     PaintEqualizer();
 }
 
@@ -10832,7 +10955,7 @@ void DrawEqualizer(HDC dc, const RECT& client) {
     // Header, as in the mixer. The effects page has a way back instead of the switch.
     RECT title{Scale(24), Scale(11), at.toggle.left - Scale(8), Scale(39)};
     if (g_eq.effects) title.right = at.close.left - Scale(8);
-    DrawLabel(dc, g_eq.effects ? L"Effects" : L"Equalizer", title, g_titleFont, g_theme.text,
+    DrawLabel(dc, g_eq.sync ? L"Sync the outputs" : g_eq.effects ? L"Effects" : L"Equalizer", title, g_titleFont, g_theme.text,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     RECT subtitle{title.left, Scale(40), width - Scale(24), Scale(60)};
     DrawLabel(dc, g_eq.subtitle, subtitle, g_smallFont, g_theme.secondaryText,
@@ -10841,6 +10964,49 @@ void DrawEqualizer(HDC dc, const RECT& client) {
     DrawLabel(dc, L"", at.close, g_symbolFont, IconColor(),
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (!g_eq.effects) DrawEqToggle(dc, g, at.toggle, on, g_eq.control == EQ_TOGGLE);
+
+    if (g_eq.sync) {
+        // Lining up two outputs by ear: a test sound on both, a slider, and small steps.
+        DrawLabel(dc, L"Both outputs play the same sound. Press the test sound, then move the slider until the two clicks "
+                      L"are heard as one.",
+                  at.syncText, g_smallFont, g_theme.secondaryText, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        RECT firstLine = at.syncNames, secondLine = at.syncNames;
+        firstLine.bottom = secondLine.top = (at.syncNames.top + at.syncNames.bottom) / 2;
+        DrawLabel(dc, L"Low click: " + (g_eq.firstName.empty() ? std::wstring(L"the first output") : g_eq.firstName), firstLine,
+                  g_bodyFont, g_theme.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawLabel(dc, L"High click: " + (g_eq.mirrorName.empty() ? std::wstring(L"the second output") : g_eq.mirrorName), secondLine,
+                  g_bodyFont, g_theme.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        bool testHot = g_eq.control == EQ_SYNC_TEST;
+        DrawSurface(dc, at.syncTest, Radius(14), g_eq.testing ? g_theme.accent : control, testHot ? 1.0f : 0.0f);
+        DrawLabel(dc, g_eq.testing ? L"Stop the test sound" : L"Play a test sound", at.syncTest, g_bodyFont,
+                  g_eq.testing ? RGB(255, 255, 255) : g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        int offset = g_eq.mirror.offsetMs;
+        wchar_t value[96];
+        if (!offset) {
+            swprintf_s(value, L"No delay: both start together");
+        } else {
+            swprintf_s(value, offset > 0 ? L"The second output starts %d ms later" : L"The first output starts %d ms later",
+                       std::abs(offset));
+        }
+        DrawLabel(dc, value, at.mirrorValue, g_bodyFont, g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        float left, right, y;
+        MirrorTrack(&left, &right, &y);
+        float position = left + (right - left) * MirrorPosition(offset);
+        ThumbState thumb = g_eq.mirrorDrag ? ThumbState::Pressed
+                           : g_eq.control == EQ_MIRROR_SLIDER ? ThumbState::Hover : ThumbState::Rest;
+        DrawEqHSlider(dc, g, left, right, y, position, thumb, true);
+        static constexpr PCWSTR steps[5] = {L"-10 ms", L"-1 ms", L"Reset", L"+1 ms", L"+10 ms"};
+        for (int i = 0; i < 5; ++i) {
+            DrawSurface(dc, at.syncNudge[i], Radius(12), control, g_eq.control == EQ_SYNC_NUDGE_FIRST + i ? 1.0f : 0.0f);
+            DrawLabel(dc, steps[i], at.syncNudge[i], g_bodyFont, g_theme.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        DrawLabel(dc, L"If the high click comes first, move right (or +). If the low click comes first, move left (or -). "
+                      L"The arrow keys change it by 1 ms.",
+                  at.syncHint, g_smallFont, g_theme.secondaryText, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        DrawLabel(dc, L"Played through the mixer's engine, about 40 ms later.", at.footer, g_smallFont,
+                  g_theme.secondaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
 
     const EqLayout& layout = EqLayoutFor(g_eq.state.bands);
     int shown = g_eq.drag >= 0 ? g_eq.drag : g_eq.hover >= 0 ? g_eq.hover : g_eq.focus;
@@ -11025,47 +11191,6 @@ void DrawEqualizer(HDC dc, const RECT& client) {
                     : L"A limiter catches the peaks.";
         bool warn = g_eq.gain.on && ((!limiter && g_eq.gain.tenths >= 30) || g_eq.gain.tenths >= 60);
         DrawLabel(dc, note, at.gainNote, g_smallFont, warn ? g_theme.accent : g_theme.secondaryText,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-
-    // Also played on a second output.
-    if (g_eq.effects && g_eq.app.empty() && g_flow == eRender) {
-        const RECT& row = at.mirrorRow;
-        DrawSurface(dc, row, Radius(16), g_theme.panel);
-        RECT name{row.left + Scale(16), row.top + Scale(8), at.infoMirror.left - Scale(4), row.top + Scale(44)};
-        DrawLabel(dc, L"Also play on a second output", name, g_bodyFont, g_theme.text,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        DrawInfoMark(dc, at.infoMirror, g_eq.control == EQ_INFO_MIRROR);
-        DrawEqToggle(dc, g, at.mirrorToggle, g_eq.mirror.on, g_eq.control == EQ_MIRROR_TOGGLE);
-        DrawSurface(dc, at.mirrorTarget, Radius(12), control, g_eq.control == EQ_MIRROR_TARGET ? 1.0f : 0.0f);
-        RECT targetText{at.mirrorTarget.left + Scale(14), at.mirrorTarget.top, at.mirrorTarget.right - Scale(14),
-                        at.mirrorTarget.bottom};
-        bool named = !g_eq.mirrorName.empty();
-        DrawLabel(dc, named ? g_eq.mirrorName : std::wstring(L"Choose the second output"), targetText, g_bodyFont,
-                  named && g_eq.mirror.on ? g_theme.text : g_theme.secondaryText,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        int offset = g_eq.mirror.offsetMs;
-        wchar_t value[96];
-        if (!offset) {
-            swprintf_s(value, L"No delay between the outputs");
-        } else {
-            swprintf_s(value, offset > 0 ? L"Second output delayed by %d ms" : L"First output delayed by %d ms", std::abs(offset));
-        }
-        DrawLabel(dc, value, at.mirrorValue, g_smallFont, g_eq.mirror.on ? g_theme.text : g_theme.secondaryText,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        float left, right, y;
-        MirrorTrack(&left, &right, &y);
-        float position = left + (right - left) * MirrorPosition(offset);
-        ThumbState thumb = g_eq.mirrorDrag ? ThumbState::Pressed
-                           : g_eq.control == EQ_MIRROR_SLIDER ? ThumbState::Hover : ThumbState::Rest;
-        DrawEqHSlider(dc, g, left, right, y, position, thumb, g_eq.mirror.on);
-        bool noCable = FindFxSink().empty();
-        PCWSTR note = !g_eq.mirror.on ? L"Plays what this output plays on a second output too."
-                    : g_eq.mirror.target.empty() ? L"Choose the second output."
-                    : noCable ? L"Needs VB-CABLE: the sound runs through the mixer's engine."
-                    : L"Move the slider until both are heard together.";
-        DrawLabel(dc, note, at.mirrorNote, g_smallFont,
-                  g_eq.mirror.on && (noCable || g_eq.mirror.target.empty()) ? g_theme.accent : g_theme.secondaryText,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
@@ -11445,10 +11570,19 @@ void SetExpertFromPoint(POINT point) {
 
 // Shows an equalizer over the mixer until it is closed. With `app`, an
 // executable name, it is that app's own; otherwise the output's.
+// What the sync page needs: where the second output is kept, and the output the sound plays on first.
+struct SyncRequest {
+    std::wstring key;    // "devMirror_v1:<GUID>" or "appMirror_v1:<app>".
+    std::wstring app;    // The app or input, empty for an output.
+    std::wstring guid;   // The output's GUID, for an output.
+    std::wstring first;  // The id of the output the sound plays on first.
+    std::wstring name;   // What the page is about, in its header.
+};
+
 void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& deviceName,
-                  const std::wstring& app = L"", bool startOnEffects = false) {
-    if (g_eq.window || g_outputMenuOpen || (deviceId.empty() && app.empty())) return;
-    if (app.empty() && EqualizerApoFolder().empty() && FindFxSink().empty()) {
+                  const std::wstring& app = L"", bool startOnEffects = false, const SyncRequest* sync = nullptr) {
+    if (g_eq.window || g_outputMenuOpen || (!sync && deviceId.empty() && app.empty())) return;
+    if (!sync && app.empty() && EqualizerApoFolder().empty() && FindFxSink().empty()) {
         MessageBoxW(owner,
                 L"The equalizer of an output needs one of two things:\n\n"
                 L"\u2022 Equalizer APO, a small free and open-source audio filter (no delay), or\n"
@@ -11464,7 +11598,18 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
     KillTimer(owner, TIMER_CHECK_FOCUS);
     g_eq = {};
     g_eq.app = app;
-    if (app.empty()) {
+    if (sync) {
+        g_eq.sync = true;
+        g_eq.mirrorKey = sync->key;
+        g_eq.mirrorApp = sync->app;
+        g_eq.mirrorGuid = sync->guid;
+        g_eq.syncFirst = sync->first;
+        g_eq.subtitle = ShortOutputName(sync->name);
+        g_eq.mirror = LoadMirrorValue(sync->key);
+        g_eq.firstName = OutputNameForId(sync->first);
+        g_eq.mirrorName = OutputNameForId(g_eq.mirror.target);
+        g_mirrorTestOffset = g_eq.mirror.offsetMs;
+    } else if (app.empty()) {
         g_eq.guid = EndpointGuid(deviceId);
         g_eq.subtitle = ShortOutputName(deviceName);
         g_eq.state = LoadEqualizer(g_eq.guid);
@@ -11488,16 +11633,12 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
         }
     }
     g_eq.loudMax = LoadLoudMax(EqLoudMaxKey());
-    if (app.empty()) {
-        g_eq.gain = LoadDeviceGain(g_eq.guid);
-        g_eq.mirror = LoadDeviceMirror(g_eq.guid);
-        g_eq.mirrorName = OutputNameForId(g_eq.mirror.target);
-    }
+    if (app.empty() && !sync) g_eq.gain = LoadDeviceGain(g_eq.guid);
     if (g_eq.state.bands > 15) {
         g_eq.state = ResampleEqualizer(g_eq.state, 15);
         g_eq.dirty = true;
     }
-    g_eq.effects = startOnEffects && EqHasEffects();
+    g_eq.effects = (startOnEffects || sync) && EqHasEffects();
 
     // Over the mixer, as wide as it.
     RECT client{};
@@ -11658,19 +11799,16 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     g_eq.gainDrag = true;
                     SetCapture(panel);
                     SetGainFromPoint(point, false);
-                } else if (control == EQ_MIRROR_TOGGLE) {
-                    g_eq.mirror.on = !g_eq.mirror.on;
-                    if (g_eq.mirror.on && g_eq.mirror.target.empty()) {
-                        HideInfoTip();
-                        ShowMirrorMenu(owner);  // It needs a second output to play on.
-                        if (g_eq.mirror.target.empty()) g_eq.mirror.on = false;
+                } else if (control == EQ_SYNC_TEST) {
+                    if (g_eq.testing) {
+                        StopMirrorTest();
+                        g_eq.testing = false;
+                    } else if (!g_eq.syncFirst.empty() && !g_eq.mirror.target.empty()) {
+                        g_eq.testing = StartMirrorTest(g_eq.syncFirst, g_eq.mirror.target, g_eq.mirror.offsetMs);
                     }
-                    SaveMirror();
                     PaintEqualizer();
-                } else if (control == EQ_MIRROR_TARGET) {
-                    HideInfoTip();
-                    ShowMirrorMenu(owner);
-                    PaintEqualizer();
+                } else if (control >= EQ_SYNC_NUDGE_FIRST && control < EQ_SYNC_NUDGE_END) {
+                    NudgeMirror(control - EQ_SYNC_NUDGE_FIRST);
                 } else if (control == EQ_MIRROR_SLIDER) {
                     g_eq.mirrorDrag = true;
                     SetCapture(panel);
@@ -11782,6 +11920,11 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
                     PaintEqualizer();
                     continue;
                 }
+                if (g_eq.sync && (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT)) {
+                    NudgeMirror(msg.wParam == VK_RIGHT ? 3 : 1);  // 1 ms either way.
+                    continue;
+                }
+                if (g_eq.sync && (msg.wParam == VK_UP || msg.wParam == VK_DOWN)) continue;
                 switch (msg.wParam) {
                     case VK_LEFT:
                     case VK_RIGHT:
@@ -11821,6 +11964,7 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
         DispatchMessageW(&msg);
     }
     if (GetCapture() == panel) ReleaseCapture();
+    StopMirrorTest();
     HideInfoTip();
     ApplyEqualizer(true);
     DestroyWindow(panel);
@@ -11843,6 +11987,67 @@ void RunEqualizer(HWND owner, const std::wstring& deviceId, const std::wstring& 
     if (g_settings.closeWhenFocusIsLost && IsWindowVisible(owner)) {
         SetTimer(owner, TIMER_CHECK_FOCUS, 150, nullptr);
     }
+}
+
+// The page that lines up an output with its second output.
+void OpenSyncPage(HWND window, const SyncRequest& request) {
+    RunEqualizer(window, L"", request.name, L"", false, &request);
+}
+
+// Offers the other outputs for "Also play on": the one picked becomes the second output and the sync page opens,
+// so the delay can be set right away. The first entry turns it off.
+void ChooseMirror(HWND window, const SyncRequest& request, POINT screenPoint) {
+    if (g_outputMenuOpen) return;
+    DeviceMirror mirror = LoadMirrorValue(request.key);
+    std::vector<OutputDevice> outputs;
+    std::wstring currentId;
+    LoadOutputDevices(outputs, currentId);
+    std::vector<OutputDevice> items;
+    std::vector<std::wstring> ids;
+    items.push_back({L"", L"Not on a second output", L"", !DeviceMirrorActive(mirror)});
+    ids.push_back(L"");
+    int current = DeviceMirrorActive(mirror) ? -1 : 0;
+    for (const OutputDevice& output : outputs) {
+        if (EndpointGuid(output.id) == EndpointGuid(request.first)) continue;  // Not the output it plays on already.
+        if (DeviceMirrorActive(mirror) && _wcsicmp(output.id.c_str(), mirror.target.c_str()) == 0) {
+            current = static_cast<int>(items.size());
+        }
+        items.push_back(output);
+        ids.push_back(output.id);
+    }
+    g_outputMenuOpen = true;
+    int chosen = RunOutputList(window, items, current, L"No other output", nullptr, &screenPoint);
+    g_outputMenuOpen = false;
+    if (!IsWindow(window) || chosen < 0 || chosen >= static_cast<int>(ids.size())) return;
+    if (chosen == 0) {
+        mirror.on = false;
+        StoreMirror(request.key, request.app, request.guid, mirror);
+        RefreshSourceList(window);
+        return;
+    }
+    mirror.on = true;
+    mirror.target = ids[static_cast<size_t>(chosen)];
+    StoreMirror(request.key, request.app, request.guid, mirror);
+    RefreshSourceList(window);
+    OpenSyncPage(window, request);
+}
+
+// The output an app is heard on right now.
+std::wstring AppFirstOutputId(DWORD pid, const std::wstring& exe) {
+    std::wstring id = DefaultOutputId();
+    if (IAudioPolicyConfigFactory* config = CreateAudioPolicyConfig()) {
+        id = HeardDeviceId(config, pid, exe, id);
+        config->Release();
+    }
+    return id;
+}
+
+// The label of the entry in the menus, and whether it is on.
+std::wstring MirrorMenuLabel(const std::wstring& key) {
+    DeviceMirror mirror = LoadMirrorValue(key);
+    if (!DeviceMirrorActive(mirror)) return L"Also play on another output...";
+    std::wstring name = OutputNameForId(mirror.target);
+    return L"Also playing on: " + (name.empty() ? std::wstring(L"another output") : name);
 }
 
 // A click on a row's "EQ" or "LM" badge.
@@ -11871,10 +12076,23 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
     CancelNameTooltip(window);
     SelectRow(DRAG_MASTER);
     std::vector<OutputDevice> items;
+    int mirrorIndex = -1, syncIndex = -1;
+    SyncRequest request;
     items.push_back({L"", L"Output device", L"\uE7F5", false});
     if (g_flow == eRender) {
         items.push_back({L"", L"Equalizer", L"\uE9E9", g_endpointName.empty()});
         items.push_back({L"", L"Effects", L"\uE9D9", g_endpointName.empty()});
+        request.first = DefaultOutputId();
+        request.guid = EndpointGuid(request.first);
+        request.key = L"devMirror_v1:" + request.guid;
+        request.name = g_endpointName;
+        static const wchar_t mirrorGlyph[] = {0xE7F5, 0}, syncGlyph[] = {0xE916, 0};
+        mirrorIndex = static_cast<int>(items.size());
+        items.push_back({L"", MirrorMenuLabel(request.key), mirrorGlyph, request.first.empty()});
+        if (MirrorNeededFor(request.guid)) {
+            syncIndex = static_cast<int>(items.size());
+            items.push_back({L"", L"Sync the two outputs...", syncGlyph, false});
+        }
     }
     const std::wstring defaultDeviceId = DefaultDeviceId(g_flow);
     const int startVolume = defaultDeviceId.empty() ? -1 : Wh_GetIntValue(DeviceStartKey(defaultDeviceId).c_str(), -1);
@@ -11894,6 +12112,14 @@ void ShowMasterMenu(HWND window, POINT screenPoint) {
         GetClientRect(window, &client);
         RECT anchor = RowRect(DRAG_MASTER, client.right);
         ShowOutputPicker(window, &anchor);
+        return;
+    }
+    if (chosen >= 0 && chosen == mirrorIndex) {
+        ChooseMirror(window, request, screenPoint);
+        return;
+    }
+    if (chosen >= 0 && chosen == syncIndex) {
+        OpenSyncPage(window, request);
         return;
     }
     if (chosen == startIndex) {
@@ -12212,7 +12438,7 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
 
     // System sounds and sessions without a process cannot be routed.
     enum MenuItem { OUTPUT, RENAME, COPY, HIDE, HIDE_PERMANENTLY, MAKE_DEFAULT, MOVE_ALL_APPS,
-                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL, STOPLISTEN, LISTEN };
+                    BOOST, HOTKEY, EQUALIZER, EFFECTS, STARTVOL, STOPLISTEN, LISTEN, MIRROR, SYNC };
     const std::wstring executablePath = (*g_apps)[row].executablePath;
     const bool systemSoundsRow = (*g_apps)[row].systemSounds;
     const bool boosted = BoostUnlocked(executablePath);
@@ -12260,6 +12486,23 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
     }
     if (!device && g_flow == eRender) add(EQUALIZER, L"Equalizer", L"\uE9E9", executablePath.empty());
     if (!device && g_flow == eRender) add(EFFECTS, L"Effects", L"\uE9D9", executablePath.empty());
+    // Also played on a second output: of an output, or of an app (and its output, whatever that is).
+    SyncRequest mirrorRequest;
+    static const wchar_t mirrorGlyph[] = {0xE7F5, 0}, syncGlyph[] = {0xE916, 0};
+    const bool canMirror = g_flow == eRender && (device ? !deviceId.empty() : routable && !executablePath.empty());
+    if (canMirror) {
+        if (device) {
+            mirrorRequest.first = deviceId;
+            mirrorRequest.guid = EndpointGuid(deviceId);
+            mirrorRequest.key = L"devMirror_v1:" + mirrorRequest.guid;
+        } else {
+            mirrorRequest.app = ExeFileName(executablePath);
+            mirrorRequest.key = L"appMirror_v1:" + mirrorRequest.app;
+        }
+        mirrorRequest.name = (*g_apps)[row].name;
+        add(MIRROR, MirrorMenuLabel(mirrorRequest.key).c_str(), mirrorGlyph, false);
+        if (DeviceMirrorActive(LoadMirrorValue(mirrorRequest.key))) add(SYNC, L"Sync the two outputs...", syncGlyph, false);
+    }
     if (!device && g_flow == eRender) add(HOTKEY, hotkeyLabel.c_str(), L"\uE765", executablePath.empty());
     if (!device && !(*g_apps)[row].virtualInput) add(COPY, L"Copy process name", L"\uE8C8", processName.empty());
     if ((*g_apps)[row].virtualInput) add(STOPLISTEN, L"Stop listening", L"", false);
@@ -12387,6 +12630,20 @@ void ShowSourceMenu(HWND window, int row, POINT screenPoint) {
         g_fxRetryAfter.erase(L"in:" + guid);
         MonitorsChanged();
         RefreshSourceList(window);
+        return;
+    }
+
+    if (command == MIRROR || command == SYNC) {
+        if (!device) {
+            DWORD pid = (*g_apps)[row].processId ? (*g_apps)[row].processId
+                        : (*g_apps)[row].processIds.empty() ? 0 : (*g_apps)[row].processIds.front();
+            mirrorRequest.first = AppFirstOutputId(pid, mirrorRequest.app);
+        }
+        if (command == MIRROR) {
+            ChooseMirror(window, mirrorRequest, screenPoint);
+        } else {
+            OpenSyncPage(window, mirrorRequest);
+        }
         return;
     }
 
