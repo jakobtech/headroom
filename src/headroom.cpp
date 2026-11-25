@@ -70,6 +70,12 @@
 - loudMaxPath: ""
   $name: LoudMax path
   $description: Full path to LoudMax64.dll, for example C:\VST\LoudMax64.dll. Leave empty to look for it in the usual VST folders.
+- loudMaxEnabled: "on"
+  $name: LoudMax
+  $description: Off hides LoudMax everywhere and does not use it, even when it is installed.
+  $options:
+  - "on": "On"
+  - "off": "Off"
 - switchCommunicationsDevice: true
   $name: Also switch the communications device
   $description: When you pick a playback device in the mixer, also make it the default communications device, like Windows Settings does. Calling apps such as Teams, Zoom or Discord then follow the switch. Turn off to keep the communications device unchanged.
@@ -256,6 +262,7 @@ struct Settings {
     bool moveNotifications = true;
     bool switchCommunicationsDevice = true;
     std::wstring loudMaxPath;
+    bool loudMaxEnabled = true;  // Off: it is hidden and not used.
     bool animations = true;
     int backgroundOpacity = 85;
     std::wstring backgroundEffect = L"blur";
@@ -782,6 +789,11 @@ void LoadSettings() {
     g_settings.moveNotifications = Wh_GetIntSetting(L"moveNotifications") != 0;
     g_settings.switchCommunicationsDevice =
         Wh_GetIntSetting(L"switchCommunicationsDevice") != 0;
+    {
+        WindhawkUtils::StringSetting loudMaxEnabled = WindhawkUtils::StringSetting::make(L"loudMaxEnabled");
+        std::wstring value = loudMaxEnabled.get();
+        g_settings.loudMaxEnabled = value != L"off";
+    }
     {
         WindhawkUtils::StringSetting loudMaxPath =
             WindhawkUtils::StringSetting::make(L"loudMaxPath");
@@ -7636,11 +7648,11 @@ std::wstring LoudMaxOutputPath() {
 }
 
 bool LoudMaxForApps() {
-    return !LoudMaxPath().empty();
+    return g_settings.loudMaxEnabled && !LoudMaxPath().empty();
 }
 
 bool LoudMaxForOutputs() {
-    return !LoudMaxOutputPath().empty();
+    return g_settings.loudMaxEnabled && !LoudMaxOutputPath().empty();
 }
 
 LoudMaxState LoadLoudMax(const std::wstring& key);
@@ -10291,8 +10303,7 @@ EqGeometry EqMeasure(int width) {
         at.surface = {Scale(12), y, width - Scale(12), y + Scale(232)};
         y += Scale(240);
     }
-    at.footer = {Scale(24), y, width - Scale(24), y + Scale(26)};
-    at.height = y + Scale(34);
+    at.height = y + Scale(8);
     return at;
 }
 
@@ -10866,8 +10877,6 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         DrawLabel(dc, L"If the high tap comes first, move right (or +). If the low tap comes first, move left (or -). "
                       L"The arrow keys change it by 1 ms.",
                   at.syncHint, g_smallFont, g_theme.secondaryText, DT_LEFT | DT_TOP | DT_WORDBREAK);
-        DrawLabel(dc, L"Played through the mixer's engine, about 40 ms later.", at.footer, g_smallFont,
-                  g_theme.secondaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
 
@@ -11169,9 +11178,6 @@ void DrawEqualizer(HDC dc, const RECT& client) {
         }
     }
 
-    DrawLabel(dc, L"Played through the mixer's own engine, about 40 ms later.",
-              at.footer, g_smallFont, g_eq.failed ? g_theme.accent : g_theme.secondaryText,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 void PaintEqualizer() {

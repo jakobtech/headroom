@@ -131,6 +131,7 @@ struct Option {
     PCWSTR label;
 };
 constexpr Option kThemeOptions[] = {{L"system", L"Windows"}, {L"dark", L"Dark"}, {L"light", L"Light"}};
+constexpr Option kLoudMaxOptions[] = {{L"on", L"On"}, {L"off", L"Off"}};
 constexpr Option kStyleOptions[] = {{L"windows11", L"Windows 11"}, {L"windows10", L"Windows 10"}};
 constexpr Option kEffectOptions[] = {{L"glass", L"Frosted"}, {L"blur", L"Blur"}, {L"none", L"None"}};
 constexpr Option kRowsOptions[] = {{L"auto", L"Fill"}, {L"5", L"5"},   {L"7", L"7"},
@@ -172,6 +173,7 @@ PCWSTR SettingInfo(const std::wstring& name) {
         {L"showAllSessions", L"Shows every audio session separately per output, including unused ones, instead of one row per app. Most people leave this off."},
         {L"eqRangeCustom", L"Lets the equalizer bands of apps, outputs and inputs go beyond 12 dB. The most is set by the slider below. Bands you set higher stay as they are if you turn this off, but the faders then show them at the 12 dB end."},
         {L"eqRangeDb", L"The most an equalizer band can raise or lower, 12 to 60 dB, while the extended range is on. Large boosts add a lot of level and can distort: the limiter (the mixer's own, or LoudMax) catches the peaks. Keep the volume low when you try a high value."},
+        {L"loudMaxEnabled", L"LoudMax is a free limiter plugin that keeps loud peaks in check. On: it shows up in the effects of apps and outputs once Headroom finds LoudMax64.dll (see the Setup guide). Off: it is hidden there and not used, even when it is installed."},
         {L"volumeStep", L"How many percent one step of the mouse wheel changes, over an app row, the master volume or the tray icon. 1 to 20; 5 is usual."},
     };
     for (const Entry& entry : entries) {
@@ -397,6 +399,7 @@ void BuildItems() {
         toggle(L"Silent apps on every output", L"showIdleAppsOnAllOutputs"),
         toggle(L"Show all audio sessions", L"showAllSessions"),
         slider(L"Mouse-wheel step", L"volumeStep", 1, 20, L" %"),
+        segments(L"LoudMax", L"loudMaxEnabled", kLoudMaxOptions, 2),
     };
     const int columnWidth = 410, rowHeight = 44, rowStep = 48, top = 76;
     for (int column = 0; column < 2; ++column) {

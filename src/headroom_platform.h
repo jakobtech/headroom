@@ -402,6 +402,7 @@ inline PCWSTR DefaultString(const std::wstring& name) {
     if (name == L"visualStyle") return L"windows11";
     if (name == L"backgroundEffect") return L"blur";
     if (name == L"visibleRows") return L"auto";
+    if (name == L"loudMaxEnabled") return L"on";
     return L"";
 }
 inline int DefaultInt(const std::wstring& name) {

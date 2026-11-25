@@ -11,6 +11,10 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
+## 2.1.0-alpha8 (in progress)
+- Settings: *LoudMax* On/Off. Off hides LoudMax in the effects of apps and outputs and does not use it, even when it is installed.
+- The note about the delay under the equalizer and effects panels is gone.
+
 ## 2.1.0-alpha7
 - Equalizer APO is no longer part of Headroom. The equalizer, gain and LoudMax of an output are done by Headroom's own engine for everything that plays through it (it needs VB-CABLE), and the *Equalizer APO* setting, the download page and the setup step are gone. What earlier versions left in the configuration folder of Equalizer APO is taken out once at start: the file of Headroom is deleted and the line that reads it is taken out (the configuration from before stays in `config.before-headroom.txt`).
 - LoudMax is found in the usual VST folders (for example `C:\Program Files\VSTPlugins`) or by the path in the settings; it is no longer looked for in the folder of Equalizer APO.
