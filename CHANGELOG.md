@@ -11,7 +11,7 @@ git switch -c back-to-alpha1 v2.1.0-alpha1   # continue from there
 git revert <commit>             # undo one change, keep the history
 ```
 
-## 2.1.0-alpha8 (in progress)
+## 2.1.0-alpha8
 - Settings: *LoudMax* On/Off. Off hides LoudMax in the effects of apps and outputs and does not use it, even when it is installed.
 - The note about the delay under the equalizer and effects panels is gone.
 - Equalizer: Basic (bass, mids, treble) and the fine tuning of 5, 10 or 15 bands are now two layers that both play. Going from Basic to more bands does not change the sound: the faders of the new layout show the curve of Basic fitted to their bands, and what you move on top of it adds to Basic. Back on Basic, your Basic is as you left it and the fine tuning keeps playing. Before, the curve was only read over to the new bands, which changed the sound.
